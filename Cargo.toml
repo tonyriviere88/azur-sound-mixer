@@ -23,18 +23,34 @@ png = "0.18"
 azur-egui-theme = { path = "../azur-egui-theme" }
 egui = { version = "0.35", default-features = false }
 eframe = { version = "0.35", default-features = false, features = [
+    # **`wgpu_no_default_features`, and never `wgpu`.** Both give this program the wgpu
+    # painter; the difference is 1,096,192 measured bytes, and it is not optional care.
+    #
     # wgpu, not glow, and the reason is not performance. glow presents through OpenGL,
     # and the compositor hands an OpenGL window to the screen through a vertical
     # resample: a one-pixel line loses a quarter of its contrast and the faintest ones
     # vanish. This panel is drawn in one-pixel strokes, so it cannot afford that.
-    # `azur_egui_theme::render` has the measurement and picks the backend.
+    # `azur_egui_theme::render` has the measurement and picks the backend — Vulkan on
+    # Windows, and nothing behind it.
     #
-    # glow stays compiled in as an escape hatch for a machine where wgpu will not
-    # start, which is the only thing it is still here for. It costs a smaller resident
-    # set, which was why it used to be the default.
-    "wgpu",
-    "glow",
-    "default_fonts",
+    # That pinning is what `wgpu` throws away. eframe defines the feature as
+    # `["wgpu_no_default_features", "egui-wgpu/default"]`, and `egui-wgpu/default`
+    # contains `wgpu/default` — *every backend wgpu has*. So taking the obvious-looking
+    # name compiles D3D12, GLES and WebGL in alongside Vulkan, together with naga's
+    # HLSL and GLSL writers to feed them, for backends `render::backends` will never
+    # name. `wgpu_no_default_features` is `["dep:wgpu", "dep:egui-wgpu", "dep:pollster"]`
+    # and nothing else, so the feature set that reaches wgpu is the one the theme pins.
+    #
+    # Nothing in a dependency can enforce this — `azur-egui-theme` sets
+    # `default-features = false` on its own `egui-wgpu` entry and eframe re-enables the
+    # default anyway, one hop further out. It has to be written here, and it has to stay
+    # written here. `cargo tree -e features -i wgpu` is the check: no line reading
+    # `wgpu feature "dx12"` or `"gles"`.
+    #
+    # The two halves of `egui-wgpu/default` that are *not* backends
+    # (`fragile-send-sync-non-atomic-wasm`, `macos-window-resize-jitter-fix`) are both
+    # wanted, and both arrive from `azur-egui-theme`'s pin instead.
+    "wgpu_no_default_features",
 ] }
 
 [dev-dependencies]
@@ -79,6 +95,122 @@ windows = { version = "0.62", features = [
 [profile.release]
 # A tray-resident widget; size and startup matter more than the last few percent
 # of throughput in code that spends its life waiting on a 60Hz vsync.
+#
+# **`"s"` and not `"z"`, and that is measured rather than cautious.** `"z"` for the whole
+# graph came out 6,208,000 bytes against `"s"`'s 5,844,480 — **363,520 bytes bigger**, for
+# the slower code. `"z"` is `"s"` plus "do not unroll and do not vectorise", and under
+# `lto = "fat"` that also withholds the inlining the link-time pass needs to see a call is
+# dead and drop it; on a graph that is mostly egui and wgpu generics, what it saves in
+# loop bodies it loses several times over in code that no longer gets eliminated. So the
+# whole-graph knob is settled in the direction that happens to be both smaller and faster,
+# and `"z"` survives only where it was measured to help — see the per-package blocks at
+# the bottom of this file. Do not "tighten" this to `"z"` without re-linking both.
 opt-level = "s"
-lto = "thin"
+# `fat` rather than `thin`, and `codegen-units = 1` with it: one module for the whole
+# graph, so a generic instantiated in twenty crates is emitted once. Costs release
+# build time and nothing else — `dev`, the profile anybody actually waits on, is
+# untouched.
+lto = "fat"
+codegen-units = 1
 strip = true
+# The largest single lever in this binary by a wide margin, and it is available because
+# **nothing in this process recovers from a panic.** Telling rustc that nothing unwinds
+# deletes every cleanup landing pad, shrinks `.pdata` to one entry per remaining
+# function, and — because `nounwind` everywhere unlocks inlining — cascades through the
+# whole generic surface of egui and wgpu.
+#
+# The check before taking it was `catch_unwind`, and it comes out clean in a way worth
+# writing down rather than re-deriving:
+#
+# - Nothing in `src/`, and nothing in eframe, egui, epaint, winit, wgpu, wgpu-core or
+#   naga. The six sites in `wgpu-hal` are all `let _ = catch_unwind(|| log!(..))` inside
+#   FFI debug callbacks — the result is discarded, so no state is recovered, and the
+#   callbacks are only registered when validation layers are on, which in a release
+#   build they are not.
+# - The two threads this program runs — `audio` and `resident` — have no recovery path
+#   to lose. A panic in the audio thread already left the widget with a stale snapshot
+#   and a channel nobody reads; a panic in the resident thread already left a dead
+#   hotkey and a ghost tray icon. Aborting turns two silent half-deaths into a crash,
+#   which for a resident widget is the more honest of the two.
+# - `resident::wndproc` is an `extern "system" fn` called by the OS, and a panic
+#   crossing that boundary aborts today regardless of this setting.
+#
+# What it costs: no dialog and no log line on the way out, and the tray icon is left for
+# the shell to reap. Reconsider only if a worker is ever added whose death the widget is
+# expected to survive — a decoder for third-party audio metadata, say. That would need
+# to be a separate process rather than a `catch_unwind`, because this measured 1,652,224
+# bytes — 22% of the binary it was taken from, and the largest single number in the audit.
+panic = "abort"
+
+# `opt-level = "z"` for the crates speed cannot reach, which is a different question
+# from "which crates are big". The test each one below passes is that its work happens
+# **once, or never**, so trading its throughput for its size trades away nothing this
+# program can feel. What is deliberately *not* here is the frame path: `vello_cpu`,
+# `harfrust`, `skrifa` and `read_fonts` rasterise and shape, `wgpu-core` looks like a
+# one-shot validation layer but encodes a command buffer every frame, and `wgpu-hal`
+# and `ash` are the frame.
+#
+# Translates the WGSL of egui's painter into SPIR-V, once, during pipeline creation.
+# The largest crate in the graph after the fix above, and the clearest case here: it is a
+# compiler that compiles two shaders per launch.
+#
+# It is also the one entry in this list whose work happens *at startup*, while the window
+# is still hidden — so it is the one whose risk had to be measured rather than reasoned
+# about. Launch to a visible panel, five runs each, discarding a cold first run:
+#
+# | naga | binary | median |
+# | --- | ---: | ---: |
+# | `opt-level = "s"` | 6,017,536 | 122 ms |
+# | **`opt-level = "z"`** | **5,844,480** | **92 ms** |
+#
+# 173,056 bytes cheaper and not a millisecond slower to open — the smaller image pages in
+# faster than the tighter code translates two shaders. If a future egui ships a materially
+# larger shader set, re-run that A/B rather than assuming this still holds.
+[profile.release.package.naga]
+opt-level = "z"
+
+# naga's diagnostics. Formats a shader compilation error, which is to say it runs on
+# the launch where the window does not open at all.
+[profile.release.package.codespan-reporting]
+opt-level = "z"
+
+# The clipboard, and the image codecs behind it. `arboard` arrives through
+# `egui-winit`'s `clipboard` feature, which eframe hardcodes in its dependency
+# declaration rather than putting behind a feature — so this graph contains a PNG, BMP
+# and TIFF decoder that no code in this program can reach, and cannot be told not to.
+# `"z"` is the whole of the available answer: they cost what they cost, but they can at
+# least cost less. (`png` here is *not* the build-dependency that renders the icon —
+# that one runs on the build machine and never ships. See `mark`.)
+[profile.release.package.arboard]
+opt-level = "z"
+[profile.release.package.image]
+opt-level = "z"
+[profile.release.package.png]
+opt-level = "z"
+[profile.release.package.miniz_oxide]
+opt-level = "z"
+[profile.release.package.fdeflate]
+opt-level = "z"
+[profile.release.package.crc32fast]
+opt-level = "z"
+
+# URL parsing and Unicode domain-name normalisation, reached only from `webbrowser`,
+# which is reached only from egui-winit's `links` feature — hardcoded by eframe in the
+# same way as the clipboard. **This program opens no links.** Every byte here is on a
+# path with no caller, so there is no throughput to protect.
+[profile.release.package.url]
+opt-level = "z"
+[profile.release.package.idna]
+opt-level = "z"
+[profile.release.package.idna_adapter]
+opt-level = "z"
+[profile.release.package.icu_normalizer]
+opt-level = "z"
+[profile.release.package.icu_properties]
+opt-level = "z"
+[profile.release.package.icu_collections]
+opt-level = "z"
+[profile.release.package.icu_provider]
+opt-level = "z"
+[profile.release.package.icu_locale_core]
+opt-level = "z"

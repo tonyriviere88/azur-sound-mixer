@@ -121,6 +121,8 @@ fn main() -> eframe::Result {
         }
     };
 
+    warn_about_glow();
+
     // Before the window, because the panel's constructor hands its handle straight
     // to this and the thread is what shows it.
     let mut resident = resident::Resident::spawn(options.hotkey.clone(), options.placement);
@@ -171,14 +173,15 @@ fn main() -> eframe::Result {
             // because all three decide whether a one-pixel stroke reaches the screen as one
             // pixel. See `azur_egui_theme::render` for what was measured.
             //
-            // `AZUR_GLOW=1` goes back to the OpenGL painter this used to use. It is lighter,
-            // and it is on the path the compositor resamples, so it is an escape hatch for a
-            // machine where wgpu will not start rather than a setting worth choosing.
-            renderer: if std::env::var_os("AZUR_GLOW").is_some() {
-                eframe::Renderer::Glow
-            } else {
-                eframe::Renderer::Wgpu
-            },
+            // One variant, because `Cargo.toml` compiles one painter: eframe's `glow`
+            // feature is gone and `Renderer::Glow` with it. `AZUR_GLOW=1` used to reach
+            // the OpenGL painter this program started life on, and what that hatch cost
+            // was 313,856 bytes of every copy — `egui_glow`, `glow` and `glutin` — held
+            // for a machine where wgpu will not start that nobody has reported. It was
+            // also, per `render`'s table, the one path that resamples the hairlines this
+            // panel is drawn in: the fallback rendered the design system wrong, which
+            // makes it a poor thing to have been paying for. See `warn_about_glow`.
+            renderer: eframe::Renderer::Wgpu,
             wgpu_options: azur_egui_theme::render::wgpu_options(),
             // A panel of flat rectangles and text: multisampling has nothing to smooth here
             // that egui's one-pixel feathering does not, and dithering — on by default —
@@ -202,6 +205,57 @@ fn main() -> eframe::Result {
     // notification area rather than leaving a ghost of it behind.
     resident.shutdown();
     result
+}
+
+/// Say so if `AZUR_GLOW` is still set somewhere, and carry on.
+///
+/// The variable used to select the OpenGL painter and there is no longer one to
+/// select. Silence would be the wrong answer: someone who set it in a shortcut or a
+/// shell profile because wgpu once failed on their machine would get the wgpu window
+/// anyway, and conclude the variable is being honoured. This is the same rule
+/// [`azur_egui_theme::render`] applies to the `AZUR_BACKEND` names it dropped — a name
+/// the program cannot serve is worse than no name at all, so the name goes with the
+/// code and what is left says why.
+fn warn_about_glow() {
+    if let Some(notice) = glow_notice(std::env::var_os("AZUR_GLOW").is_some()) {
+        eprintln!("{notice}");
+    }
+}
+
+/// What [`warn_about_glow`] would say, given whether the variable is set.
+///
+/// Split out to be testable: the environment is process-global, so a test that set
+/// `AZUR_GLOW` would be racing every other test in the binary.
+fn glow_notice(set: bool) -> Option<&'static str> {
+    set.then_some(
+        "AZUR_GLOW is set and no longer does anything: the OpenGL painter is not \
+         compiled in. This window renders on wgpu — see azur_egui_theme::render.",
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    /// A retired override name is diagnosed, not silently ignored.
+    ///
+    /// The half of this that cannot regress is already enforced by the compiler —
+    /// `eframe::Renderer` has one variant now, so nothing can route `AZUR_GLOW` back to
+    /// a painter that is not compiled in. What this covers is the other half: that the
+    /// variable does not become *silently* inert, which is the failure mode where
+    /// somebody keeps it in a shortcut for years believing it does something.
+    #[test]
+    fn azur_glow_is_reported_as_retired_rather_than_ignored() {
+        let notice = super::glow_notice(true).expect("a set AZUR_GLOW is reported");
+        assert!(notice.contains("AZUR_GLOW"), "names the variable: {notice}");
+        assert!(
+            notice.contains("no longer does anything"),
+            "says it is inert rather than describing a setting: {notice}"
+        );
+        assert_eq!(
+            super::glow_notice(false),
+            None,
+            "nothing is printed when the variable is not set"
+        );
+    }
 }
 
 /// Read the command line.

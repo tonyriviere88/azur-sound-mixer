@@ -554,18 +554,32 @@ and text at 12 and 14 points. So `main.rs` asks for `Renderer::Wgpu` and
 `render::wgpu_options()`, which carries the backend, the high-performance adapter and
 wgpu's memory-favouring allocator together.
 
-| | glow (before) | wgpu (now) |
+| | glow (before) | wgpu (as shipped) |
 | --- | --- | --- |
-| release binary | 6.4 MB | 11.4 MB |
+| release binary | 6.4 MB | 5.8 MB |
 | the frame that reaches the screen | resampled once the window goes quiet | as drawn |
 
-The binary is the visible cost and there is a resident-set cost too — the design system
-measured about 200 MB, and calls it the price of the frame arriving intact. For a widget
-that is invisible most of the time that is the least comfortable trade in this program,
-and it is still the right way round: a window that renders the design system and then has
-it resampled away has not rendered it. `AZUR_GLOW=1` goes back to the OpenGL painter for a
-machine where wgpu will not start; `AZUR_BACKEND` and `AZUR_ADAPTER` are the design
-system's own overrides.
+That table used to read 11.4 MB and be the uncomfortable half of this decision. It does
+not any more, and the reason is worth stating: **almost none of the 5 MB that came off was
+wgpu.** It was four embedded fonts behind a font read that cannot fail, every graphics
+backend except the one this window presents on, an OpenGL painter kept as a fallback, and
+unwinding tables for panics nothing catches — see [Size](#size). The wgpu window now costs
+less than the glow window it replaced.
+
+There is still a resident-set cost — the design system measured about 200 MB, and calls it
+the price of the frame arriving intact. For a widget that is invisible most of the time
+that is the least comfortable trade left in this program, and it is still the right way
+round: a window that renders the design system and then has it resampled away has not
+rendered it. `AZUR_BACKEND` and `AZUR_ADAPTER` are the design system's own overrides.
+
+`AZUR_GLOW=1` is gone, and so is the OpenGL painter it selected. It was an escape hatch
+for a machine where wgpu will not start, which nobody has reported, and it was 313,856
+bytes of every copy — but the argument that retired it is not the bytes: OpenGL is the one
+row of the table above that *both* leaks and loses the hairlines, so the fallback rendered
+the design system wrong. A fallback that produces a window this program would not ship is
+not insurance. Setting the variable now prints a line saying it does nothing rather than
+being silently ignored, on the rule that a name the program cannot serve is worse than no
+name at all.
 
 One thing this bought for free: screen captures are now worth trusting. The resample
 appears *only* on the composed path, and taking a capture forces composition — so under
@@ -573,6 +587,71 @@ glow every screenshot in this repository landed on the degraded path and looked 
 is indistinguishable from nothing being wrong. Under Vulkan the composed copy is the frame,
 so the measurements above ("`#4d525c`", "both middles on 349.5") are measurements of what
 the window actually shows.
+
+## Size
+
+```
+11,547,648 bytes  ->  5,844,480 bytes      -49.4%
+```
+
+Nothing this program does was given up. Every number below came out of a linked
+executable — a feature change or a profile flag is one build, so there was no reason to
+estimate — and the method is the one in
+[`binary-size-playbook.md`](../yet-another-file-explorer/binary-size-playbook.md), which
+records the same audit on the file explorer.
+
+| Change | Measured | |
+| --- | ---: | --- |
+| `eframe/wgpu` → `eframe/wgpu_no_default_features` | **−1,096,192** | D3D12, GLES and WebGL, plus naga's HLSL and GLSL writers, for backends this window never presents on |
+| drop `eframe/default_fonts` | **−1,418,240** | four TrueType faces behind a font read that does not fail |
+| drop `eframe/glow` | −313,856 | the OpenGL painter, `glow` and `glutin` |
+| `lto = "fat"` + `codegen-units = 1` | −997,888 | release build 55s → 2m34s; `dev` untouched |
+| `opt-level = "z"` on the run-once crates | −224,768 | naga, the unreachable clipboard codecs, the unreachable URL parser |
+| `panic = "abort"` | **−1,652,224** | nothing in this process recovers from a panic |
+
+Only one of those carried a risk worth measuring afterwards: naga is 173,056 bytes of the
+`"z"` row *and* it runs at startup, translating egui's WGSL into SPIR-V while the window is
+still hidden. Launch to a visible panel came out at **92 ms median against 122 ms** —
+smaller and, if anything, quicker to open, because the smaller image pages in faster than
+the tighter code translates two shaders. Without that A/B this would have been a guess
+dressed as a decision.
+
+Three of those are worth more than their bytes, because each is a thing you would not
+find by reading the code:
+
+- **The one-word manifest bug.** eframe's `wgpu` feature is defined as
+  `["wgpu_no_default_features", "egui-wgpu/default"]`, and `egui-wgpu/default` contains
+  `wgpu/default` — *every backend wgpu has*. `azur-egui-theme` pins exactly one backend
+  per platform and documents that a consumer must take `wgpu_no_default_features`; this
+  manifest took `wgpu`, which quietly turned the whole default back on. No care inside a
+  dependency can prevent that. `cargo tree -e features -i wgpu` is the check, and it takes
+  a minute: there should be no line reading `wgpu feature "dx12"`.
+- **The fonts were the four largest objects in the executable**, at 418,804 + 361,676 +
+  324,135 + 309,408 bytes of `.rdata`. `azur_egui_theme::fonts` installs Segoe UI and
+  Consolas from disk and starts from `FontDefinitions::empty`, so epaint's four were a
+  fallback for a font read that cannot fail on Windows. What it costs is emoji, which
+  Segoe UI does not carry: a scan of every string literal in this program found exactly
+  one character above U+2189, a `✕` in `--help` text that goes to a console. `.rdata` fell
+  from 34.7% of the file to 18.3%.
+- **`panic = "abort"` was available**, which is not usually true and is worth checking
+  before wanting the number. Nothing in `src/` calls `catch_unwind`, nor does eframe,
+  egui, epaint, winit, wgpu, wgpu-core or naga; `wgpu-hal`'s six sites all discard the
+  result and wrap a `log!` in an FFI callback that a release build does not register.
+  Neither of this program's two threads had a recovery path to lose. `.pdata` — one unwind
+  entry per function — fell from 314,368 bytes to 81,408.
+
+Two measurements went the other way and are recorded so they are not re-attempted:
+
+| Attempted | Result |
+| --- | --- |
+| `opt-level = "z"` for the whole graph | **363,520 bytes *bigger*** than `"s"`, and slower with it. Under fat LTO, `"z"` withholds the inlining the link-time pass needs to prove a call dead. `"z"` survives only on the crates where it was measured to help. |
+| removing the clipboard and URL stacks | Not possible from this manifest. `arboard` with an `image`/`png`/`bmp`/`tiff` decoder, and `url` + `idna`, arrive through egui-winit's `clipboard` and `links` features, which eframe hardcodes in its *dependency declaration* rather than putting behind a feature. About 180 KB this program cannot reach and cannot remove; `"z"` is the whole of the available answer. |
+
+What is left is mostly not optional. Roughly: 1.5 MB of epaint's CPU rasterising and text
+shaping (`vello_cpu`, `fearless_simd`, `harfrust`, `skrifa`, `read_fonts` — all
+non-optional epaint 0.35 dependencies), 1.2 MB of wgpu and naga, 900 KB of std/core/alloc,
+220 KB of egui, 105 KB of `.rsrc` for the icon Explorer shows, and 97 KB of this
+program's own code. Past this point every byte costs a feature.
 
 ## Building and deploying
 
