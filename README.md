@@ -569,7 +569,9 @@ Four things make the auto-hide behave:
   egui `Area`s inside this same viewport, so opening one is not a blur: picking a
   device cannot dismiss the panel out from under the pointer. Dragging and resizing
   are likewise safe — `BeginResize` and `StartDrag` hand over to a platform modal
-  loop on this window, which keeps the focus throughout.
+  loop on this window, which keeps the focus throughout. That last part is true of a
+  window the platform has made *active*; see [A panel without the focus](#a-panel-without-the-focus-has-to-still-be-a-panel)
+  for what it took to make it true of every appearance.
 - **`Esc` is consumed, not read, and after the content.** A `Select` popup takes
   `Escape` to close itself; checking for it first would put the whole panel away with a
   keystroke aimed at a dropdown.
@@ -577,6 +579,48 @@ Four things make the auto-hide behave:
 The one dismissal that looks accidental isn't: the header's ⧉ opens the Windows sound
 page, that page takes the focus, and a panel that is not staying open hides behind it.
 That is what a button which leaves the widget should do.
+
+### A panel without the focus has to still be a panel
+
+The bug this section is here for: **sometimes the very first appearance would not drag and
+would not open a device list.** Hiding it and summoning it again cured it, which is what
+made it look like a paint or a timing problem. It was neither — it was the focus, and two
+separate faults hanging off it.
+
+`SetForegroundWindow` is a request, not a call. Windows grants a foreground change to the
+process that received the last input event, and on the first summon after launch that claim
+is at its weakest: a hotkey press is ours, but a **tray click belongs to the shell** and
+`--show` belongs to nobody. So the panel can be up, painted, on top, and not have the focus
+— reproduced here by summoning it with a posted tray message, where the grant is never
+given. What that state then cost:
+
+| | what happened | why |
+| --- | --- | --- |
+| **No combobox would open** | the click opened it, the next frame closed it, for as long as the panel was up | `desktop::close_popups_on_blur` is level-triggered — it closes every popup on every frame while `!focused`, which is *while* blurred rather than *on* blur |
+| **The window would not drag** | `StartDrag` moved it 0px; the same drag on an active window moves it | winit's `drag_window` is `WM_NCLBUTTONDOWN` + `HTCAPTION`, and the modal move loop behind it wants an active window. The press that starts the drag would activate one, but not before the command is sent in that same frame |
+
+Both are fixed where they belong, and each was measured on its own with the other disabled:
+
+- **`App::close_stale_popups`** replaces the level-triggered helper with the edge: popups
+  close on the frame the focus is *lost*, and on the frame the panel is *shown again*.
+  Between them they still cover the fault that helper existed for — a device list left open
+  behind a click into another program, hanging there over a list that may no longer hold
+  the same devices when the panel comes back — and they leave a popup alone in a panel
+  which never had the focus to lose. The predicate is three booleans and one line, pulled
+  out and given a truth table in `popups_are_stale`, because the bug *was* the predicate.
+- **The focus is asked for twice more**, from the side that has the best claim each time:
+  once on every fresh appearance, from the window's own thread (winit's `focus_window`,
+  which the platform honours where the resident thread's attempt was refused), and once
+  when a drag starts — where the press that started it *is* the last input event, so the
+  grant is ours to have.
+
+Measured, with a posted tray click so the panel never gets the foreground the easy way:
+before, no popup and 0px of drag; with only the edge-triggered close, the popup opens and
+the drag is still dead; with only the drag-start focus, 50px of drag; with both, both.
+
+The wider principle is a promise the auto-hide already makes above — "a panel that never
+receives the focus at all stays up until it is dismissed, which is the right way for this
+to fail". That is only true if a panel in that state is a *working* panel.
 
 **The outline belongs to the compositor.** The panel used to paint its own
 `radius-xlarge` corner and `stroke-default` edge, and that produced a double border,

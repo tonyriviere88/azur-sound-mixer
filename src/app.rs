@@ -156,6 +156,11 @@ pub struct App {
     /// Whether the window has held the input focus since it was last shown. See
     /// [`App::hide_on_blur`].
     focus_seen: bool,
+    /// Whether it had the focus on the *previous* frame, which is the other half of what
+    /// `focus_seen` cannot say: one is "ever, since being shown", this is "last frame", and
+    /// the difference between them is a blur — the edge, not the level. See
+    /// [`App::close_stale_popups`].
+    was_focused: bool,
     /// The value of [`resident::Handle::shows`] this frame's focus tracking belongs
     /// to. A different one means the panel has been summoned again since.
     shows_seen: u64,
@@ -249,6 +254,7 @@ impl App {
             communications_output_pick: None,
             communications_input_pick: None,
             focus_seen: false,
+            was_focused: false,
             shows_seen: 0,
             communications_open,
         };
@@ -306,17 +312,8 @@ impl eframe::App for App {
         self.track_peaks(&snapshot, dt);
 
         // Before the content, so a popup that should be gone does not get a last frame
-        // on the way out. A menu belongs to a moment: egui has no idea the window went
-        // away, so a device list left open survives a click into another program and is
-        // still hanging there when the panel comes back — over a list that may no longer
-        // hold the same devices, which is the version of this fault that can actually
-        // switch the wrong endpoint.
-        //
-        // The return value says whether it fired, for a caller with latched state of its
-        // own to drop. There is none here: both `Select` indices are re-derived from the
-        // snapshot at the top of every frame, so the only thing that could be stale is
-        // the popup, and that is what this closed.
-        let _ = azur_egui_theme::desktop::close_popups_on_blur(&ctx);
+        // on the way out.
+        self.close_stale_popups(&ctx);
 
         self.hide_on_blur(&ctx);
 
@@ -398,6 +395,45 @@ impl eframe::App for App {
 // ---------------------------------------------------------------------------
 
 impl App {
+    /// Close any popup that belongs to a moment which has passed.
+    ///
+    /// A menu belongs to a moment. egui has no idea the window went away, so a device list
+    /// left open survives a click into another program and is still hanging there when the
+    /// panel comes back — over a list that may no longer hold the same devices, which is
+    /// the version of this fault that can actually switch the wrong endpoint.
+    ///
+    /// Two moments close one: the frame the window **loses** the focus, and the frame the
+    /// panel is **shown again**. Between them they cover every way a popup can outlive
+    /// what it was opened over.
+    ///
+    /// # Why not `desktop::close_popups_on_blur`
+    ///
+    /// Because that helper is level-triggered — it closes every popup on every frame while
+    /// `!focused` — and this window can be up *without ever having had the focus*. The
+    /// resident thread's `SetForegroundWindow` is allowed to fail (see
+    /// [`App::hide_on_blur`]), and when it does, a level-triggered close means **no
+    /// combobox in this panel can ever open**: the click opens it and the next frame
+    /// closes it, for as long as the panel is up. That is the bug this replaced — a panel
+    /// that looked perfectly normal, would not drag and would not open a device list,
+    /// until it was hidden and summoned again with a keystroke the platform did honour.
+    ///
+    /// Edge-triggered is also the honest reading of the sentence that helper's name is:
+    /// *on* blur, not *while* blurred. And it keeps the promise
+    /// [`App::hide_on_blur`] makes — "a panel that never receives the focus at all stays
+    /// up until it is dismissed, which is the right way for this to fail" — which is only
+    /// true if a panel in that state is still a working panel.
+    fn close_stale_popups(&mut self, ctx: &egui::Context) {
+        let focused = ctx.input(|i| i.focused);
+        // Read rather than taken: `hide_on_blur` runs after this and owns `shows_seen`,
+        // because what it does with a fresh appearance — forgetting the focus it had — has
+        // to happen exactly once too.
+        let shown_again = self.resident.shows() != self.shows_seen;
+        if popups_are_stale(self.was_focused, focused, shown_again) {
+            egui::Popup::close_all(ctx);
+        }
+        self.was_focused = focused;
+    }
+
     /// Hide the panel when it loses the focus, unless it is set to stay open.
     ///
     /// The whole of what *stay open* means, and the reason it is worth a control: a
@@ -425,6 +461,20 @@ impl App {
         if shows != self.shows_seen {
             self.shows_seen = shows;
             self.focus_seen = false;
+            // Ask for the focus from *this* side as well, because the resident thread's
+            // `SetForegroundWindow` is allowed to fail and does. Windows grants a
+            // foreground change to the process that received the last input event, and on
+            // the first summon after launch that claim is at its weakest: the hotkey is
+            // ours, but a tray click belongs to the shell and `--show` belongs to nobody.
+            // A panel that comes up without the focus still *looks* right, which is what
+            // made this so hard to see — see [`App::close_stale_popups`] for what it
+            // actually cost.
+            //
+            // This is winit's `focus_window`, from the thread that owns the window, which
+            // is the one place the platform is most willing to honour it. It is a request:
+            // if it is refused as well, [`App::close_stale_popups`] is what keeps the panel
+            // usable anyway.
+            ctx.send_viewport_cmd(ViewportCommand::Focus);
         }
 
         if ctx.input(|i| i.focused) {
@@ -574,9 +624,26 @@ impl App {
 ///
 /// It must stay *after* the buttons for that reason. A single band across the whole row,
 /// added last, would take their clicks instead.
+///
+/// # Why the focus is asked for first
+///
+/// Measured, on a panel shown without the platform granting it the foreground: `StartDrag`
+/// does nothing at all — the window does not move a pixel — where the same drag on the same
+/// build moves it 50px once the window is active. winit's `drag_window` is
+/// `WM_NCLBUTTONDOWN` with `HTCAPTION`, and the modal move loop that answers it wants an
+/// active window; the press that started the drag *would* activate one, but not before the
+/// command is sent in this same frame.
+///
+/// So this asks, one command earlier. It is granted here even when the same request at
+/// appearance time was refused, because Windows gives a foreground change to the process
+/// that received the last input event and the press that just started this drag is that
+/// event. Redundant whenever the panel already has the focus, which is nearly always, and
+/// the whole of the difference between a panel you can move and one you cannot when it is
+/// not — see [`App::hide_on_blur`] for why that state happens at all.
 fn drag_window_from(ui: &Ui, rect: Rect, id: &str) {
     let drag = ui.interact(rect, ui.id().with(id), Sense::click_and_drag());
     if drag.drag_started() {
+        ui.ctx().send_viewport_cmd(ViewportCommand::Focus);
         ui.ctx().send_viewport_cmd(ViewportCommand::StartDrag);
     }
 }
@@ -1346,6 +1413,16 @@ impl App {
     }
 }
 
+/// Whether a popup opened before this frame still belongs to what it was opened over.
+///
+/// Three inputs and one line, pulled out of [`App::close_stale_popups`] because the bug it
+/// fixed *was this predicate* — read `focused` where it should have read "focus was just
+/// lost", and a panel that never had the focus loses every popup it opens, one frame after
+/// opening it. A truth table is cheap; finding that by hand cost an afternoon.
+fn popups_are_stale(was_focused: bool, focused: bool, shown_again: bool) -> bool {
+    shown_again || (was_focused && !focused)
+}
+
 // ---------------------------------------------------------------------------
 // Echo
 // ---------------------------------------------------------------------------
@@ -1421,5 +1498,42 @@ impl Echo {
     fn set_device(&mut self, flow: Flow, role: Role, value: Option<usize>) {
         self.device
             .insert((flow, role), (value, Instant::now() + ECHO_DEVICE));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::popups_are_stale;
+
+    /// The predicate behind the bug: a panel that is merely *not focused* keeps its
+    /// popups, and only the frame it *loses* the focus takes them away.
+    ///
+    /// The middle case is the regression. The panel can be up without ever having had the
+    /// focus — the resident thread's `SetForegroundWindow` is allowed to fail — and the
+    /// version of this that asked "is it focused?" made every combobox in that state
+    /// impossible to open: the click opened it and the next frame closed it, for as long as
+    /// the panel was up.
+    #[test]
+    fn only_losing_the_focus_or_being_shown_again_makes_a_popup_stale() {
+        assert!(
+            popups_are_stale(true, false, false),
+            "the blur itself: a click into another program closes the device list"
+        );
+        assert!(
+            !popups_are_stale(false, false, false),
+            "never had the focus, and did not just lose it: the popup is the user's"
+        );
+        assert!(
+            !popups_are_stale(true, true, false),
+            "still focused, nothing has happened"
+        );
+        assert!(
+            popups_are_stale(false, false, true),
+            "a fresh appearance: whatever was open belonged to the last one"
+        );
+        assert!(
+            popups_are_stale(true, true, true),
+            "and that holds for an appearance that arrives with the focus"
+        );
     }
 }
