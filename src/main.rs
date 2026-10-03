@@ -9,6 +9,7 @@
 //! azur-audio-switcher                      hidden, Win+Alt+V to open
 //! azur-audio-switcher --show               open it straight away
 //! azur-audio-switcher --no-stay-open       hides itself when it loses the focus
+//! azur-audio-switcher --overlay            draws over a fullscreen game without taking its focus
 //! azur-audio-switcher --at-pointer         opens under the mouse, not where you left it
 //! azur-audio-switcher --hotkey ctrl+alt+f9 some other keystroke
 //! azur-audio-switcher --profile test       its own settings and favourites
@@ -170,6 +171,14 @@ struct Options {
     placement: Option<resident::Placement>,
     /// `--show`: open the panel at startup instead of waiting to be summoned.
     show: bool,
+    /// `--overlay`: never take the foreground, so a fullscreen game keeps it.
+    ///
+    /// Not an `Option` and not remembered, unlike the two above, because it is a different
+    /// *kind* of setting. Those are preferences a click can change and the panel writes
+    /// down; this one trades the keyboard away for the foreground — see
+    /// [`system::hold_window_styles`] — and a trade that large should have to be asked for
+    /// by name on every run rather than found switched on months later.
+    overlay: bool,
     hotkey: hotkey::Hotkey,
     /// `--profile`: which set of remembered settings this run uses. `None` is the ordinary
     /// one — see [`state_directory`].
@@ -207,7 +216,8 @@ fn main() -> eframe::Result {
 
     // Before the window, because the panel's constructor hands its handle straight
     // to this and the thread is what shows it.
-    let mut resident = resident::Resident::spawn(options.hotkey.clone(), placement);
+    let mut resident =
+        resident::Resident::spawn(options.hotkey.clone(), placement, options.overlay);
     let handle = resident.handle();
 
     let (side, icon) = mark::bitmap(WINDOW_ICON);
@@ -239,11 +249,17 @@ fn main() -> eframe::Result {
         // itself invisible. See [`PARKED`].
         .with_visible(false)
         .with_position(PARKED);
-    if stay_open {
+    if stay_open || options.overlay {
         // On top: a volume panel you have to go looking for behind the window you are
         // trying to turn down is not a widget. Travels with *stay open* rather than
         // being a third setting, because a panel that survives a click elsewhere and
         // then sits behind the window that took the click has not survived it.
+        //
+        // `--overlay` needs it for a stronger reason, and unconditionally: the mode's
+        // whole claim is that the panel is visible over what is running while that program
+        // keeps the foreground. A panel that neither takes the focus nor sits on top is a
+        // panel nobody ever sees, so the toggle must not be able to turn this off — the
+        // *stay open* click handler in `app` honours the same floor.
         viewport = viewport.with_always_on_top();
     }
 
@@ -332,6 +348,7 @@ fn parse_arguments() -> Result<Options, String> {
         stay_open: None,
         placement: None,
         show: false,
+        overlay: false,
         hotkey: hotkey::Hotkey::parse(hotkey::DEFAULT).expect("the default hotkey parses"),
         profile: None,
     };
@@ -343,6 +360,7 @@ fn parse_arguments() -> Result<Options, String> {
             "--at-pointer" => options.placement = Some(resident::Placement::AtPointer),
             "--last-position" => options.placement = Some(resident::Placement::LastPosition),
             "--show" => options.show = true,
+            "--overlay" => options.overlay = true,
             "--profile" => {
                 let name = arguments
                     .next()
@@ -374,6 +392,10 @@ fn parse_arguments() -> Result<Options, String> {
                      \n\
                      \u{20}   --show            open the panel at startup\n\
                      \u{20}   --no-stay-open    hide it when it loses the focus\n\
+                     \u{20}   --overlay         draw over what is running without taking its\n\
+                     \u{20}                     focus, so a fullscreen game stays fullscreen.\n\
+                     \u{20}                     Costs the keyboard: no Esc, no wheel over the\n\
+                     \u{20}                     mixer, and the panel cannot be dragged\n\
                      \u{20}   --at-pointer      open it under the mouse\n\
                      \u{20}   --last-position   open it where you left it, on whichever\n\
                      \u{20}                     screen the mouse is on\n\

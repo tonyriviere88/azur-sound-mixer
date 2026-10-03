@@ -75,9 +75,8 @@ fn main() {
             // build that could not read them would go on to fail in `src/mark.rs`,
             // where `include_bytes!` would name a file in `$OUT_DIR` instead of the
             // one that is actually missing.
-            std::fs::read(&path).unwrap_or_else(|error| {
-                panic!("{}: {error} — run assets/icons.py", path.display())
-            })
+            std::fs::read(&path)
+                .unwrap_or_else(|error| panic!("{}: {error} — run assets/icons.py", path.display()))
         })
         .collect();
 
@@ -99,7 +98,9 @@ fn main() {
     let assembled = ico(&SIZES, &shipped);
     // Only when the bytes differ: a build should not touch the working tree, and
     // `rerun-if-changed` on a file this script writes could otherwise loop with itself.
-    let unchanged = std::fs::read(&icon).map(|old| old == assembled).unwrap_or(false);
+    let unchanged = std::fs::read(&icon)
+        .map(|old| old == assembled)
+        .unwrap_or(false);
     if !unchanged {
         if let Err(error) = std::fs::write(&icon, &assembled) {
             // A warning rather than a failure: a read-only checkout still builds, and

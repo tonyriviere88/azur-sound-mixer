@@ -544,10 +544,15 @@ screen: the position is remembered as an **offset from a work-area corner**, not
 desktop coordinate, so a panel parked bottom-right comes back bottom-right of whichever
 screen the mouse is on — rather than coming back on a screen nobody is looking at.
 
+Under the mouse means **centred** on it, not dropped below-right of it. The pointer is
+already sitting on whatever is being turned down, so a panel that arrives around it puts
+every control the same short distance from where the hand already is, instead of putting
+all of it on one side and making half the summons a trip across the panel.
+
 The offset is taken on every hide, so dragging the panel and putting it away remembers
 the drag. Both modes clamp the result into the work area, which is why summoning near
-the bottom of a screen puts the panel's *bottom* against the taskbar rather than its top
-under the pointer. Between monitors of different scale the arrival is approximate — the
+the bottom of a screen puts the panel's *bottom* against the taskbar rather than
+centring it on the pointer. Between monitors of different scale the arrival is approximate — the
 clamp uses the size the window has before the move and winit rescales it a frame later —
 so it can be out by the difference in that one case, and it self-corrects on the next
 hide. Opening on the right screen is worth more than the last few pixels.

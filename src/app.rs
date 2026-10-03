@@ -119,7 +119,9 @@ pub struct App {
     /// place that shows and hides this window.
     resident: resident::Handle,
     /// Whether the panel stays up when it loses the focus, and stays above other
-    /// windows. One of the two chrome toggles; see [`App::hide_on_blur`].
+    /// windows. One of the two chrome toggles; see [`App::hide_on_blur`]. Under
+    /// `--overlay` it no longer decides the second half — being on top is the mode's,
+    /// not the toggle's.
     stay_open: bool,
     /// Where the panel appears when it is summoned. The other toggle, and independent of
     /// the first: staying open is about *when* it goes away, this is about *where* it
@@ -283,12 +285,13 @@ impl eframe::App for App {
     /// Runs every frame, *including* the ones where the window is invisible — which is
     /// the only hook that does, and the reason this exists at all.
     ///
-    /// One job: keep the widget out of the Alt-Tab switcher. It cannot be done once and
-    /// forgotten, because winit re-asserts its own extended style afterwards — see
-    /// [`system::keep_out_of_alt_tab`], which reads the style back and writes only when
-    /// it has been changed under us.
+    /// One job: hold the two extended styles this window cannot be left without — out of
+    /// the Alt-Tab switcher, and under `--overlay` out of the foreground. Neither can be
+    /// done once and forgotten, because winit re-asserts its own extended style
+    /// afterwards — see [`system::hold_window_styles`], which reads the style back and
+    /// writes only when something has changed it under us.
     fn logic(&mut self, _ctx: &egui::Context, frame: &mut eframe::Frame) {
-        system::keep_out_of_alt_tab(frame);
+        system::hold_window_styles(frame, self.resident.overlay());
     }
 
     /// eframe 0.35 hands the app the root `Ui` rather than the `Context`: it spans
@@ -474,7 +477,16 @@ impl App {
             // is the one place the platform is most willing to honour it. It is a request:
             // if it is refused as well, [`App::close_stale_popups`] is what keeps the panel
             // usable anyway.
-            ctx.send_viewport_cmd(ViewportCommand::Focus);
+            //
+            // Except under `--overlay`, which is the one mode that wants this request
+            // *not* made: taking the foreground is precisely what it exists not to do.
+            // The panel then never holds the focus, `focus_seen` never becomes true, and
+            // the branch below never fires — so an overlay stays up until it is
+            // dismissed. That is the same "right way for this to fail" the paragraph
+            // above describes, reached on purpose here instead of by a refusal.
+            if !self.resident.overlay() {
+                ctx.send_viewport_cmd(ViewportCommand::Focus);
+            }
         }
 
         if ctx.input(|i| i.focused) {
@@ -640,10 +652,25 @@ impl App {
 /// event. Redundant whenever the panel already has the focus, which is nearly always, and
 /// the whole of the difference between a panel you can move and one you cannot when it is
 /// not — see [`App::hide_on_blur`] for why that state happens at all.
-fn drag_window_from(ui: &Ui, rect: Rect, id: &str) {
+///
+/// `overlay` is the one caller that withholds it, and withholding it costs the drag. See
+/// the comment on the call.
+fn drag_window_from(ui: &Ui, rect: Rect, id: &str, overlay: bool) {
     let drag = ui.interact(rect, ui.id().with(id), Sense::click_and_drag());
     if drag.drag_started() {
-        ui.ctx().send_viewport_cmd(ViewportCommand::Focus);
+        // The one focus request that `--overlay` has to withhold rather than merely not
+        // need. Windows *would* grant this one — the press that started the drag is the
+        // last input event, which is the whole reason it is here — so leaving it in would
+        // mean grabbing the panel's header yanks the foreground off the fullscreen game
+        // underneath, which is the single thing the mode promises not to do.
+        //
+        // `StartDrag` is still sent, and without an active window it is inert: dragging
+        // the panel does not work in overlay mode. Latching the pointer offset and
+        // calling `SetWindowPos` per frame is what would fix it, and it is not in this
+        // change — `--help` says so.
+        if !overlay {
+            ui.ctx().send_viewport_cmd(ViewportCommand::Focus);
+        }
         ui.ctx().send_viewport_cmd(ViewportCommand::StartDrag);
     }
 }
@@ -667,6 +694,10 @@ impl App {
     /// often enough to be a design: wanting the panel to survive a click elsewhere says
     /// nothing about whether it should reappear under the pointer.
     fn chrome(&mut self, ui: &mut Ui, window: Rect) {
+        // Read out here rather than inside the closure below, which borrows `self`
+        // mutably. Two things in this row answer to it: the *stay open* toggle's window
+        // level, and the drag surface at the bottom.
+        let overlay = self.resident.overlay();
         egui::Frame::new()
             .inner_margin(egui::Margin {
                 left: space::S3 as i8,
@@ -739,8 +770,15 @@ impl App {
                             // On top travels with it: a panel that stays open behind
                             // the window you are turning down has not stayed open in
                             // any sense the user meant.
+                            //
+                            // With a floor under `--overlay`, which has to be on top
+                            // whatever this toggle says. It does not take the focus, so
+                            // dropping to `Normal` would not put the panel *behind* the
+                            // window you are turning down — it would put it out of sight
+                            // with nothing able to raise it again. `main` applies the
+                            // same floor when it builds the viewport.
                             ui.ctx().send_viewport_cmd(ViewportCommand::WindowLevel(
-                                if self.stay_open {
+                                if self.stay_open || overlay {
                                     egui::WindowLevel::AlwaysOnTop
                                 } else {
                                     egui::WindowLevel::Normal
@@ -830,8 +868,8 @@ impl App {
                     row.top().max(window.top() + GRIP),
                     row.bottom().min(window.bottom() - GRIP),
                 );
-                drag_window_from(ui, Rect::from_x_y_ranges(title, height), "chrome-title");
-                drag_window_from(ui, Rect::from_x_y_ranges(gap, height), "chrome-gap");
+                drag_window_from(ui, Rect::from_x_y_ranges(title, height), "chrome-title", overlay);
+                drag_window_from(ui, Rect::from_x_y_ranges(gap, height), "chrome-gap", overlay);
             });
     }
 

@@ -51,10 +51,11 @@ use windows::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, CreateIconIndirect, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyIcon,
     DestroyMenu, DispatchMessageW, GetCursorPos, GetMessageW, GetSystemMetrics, GetWindowRect,
     PostMessageW, PostQuitMessage, RegisterClassW, RegisterWindowMessageW, SetForegroundWindow,
-    SetWindowPos, ShowWindow, TrackPopupMenu, TranslateMessage, HICON, HWND_TOP, ICONINFO,
-    MF_SEPARATOR, MF_STRING, MSG, SM_CXSMICON, SM_CYSMICON, SWP_NOACTIVATE, SWP_NOSIZE,
-    SWP_NOZORDER, SW_HIDE, SW_SHOW, TPM_RETURNCMD, TPM_RIGHTBUTTON, WM_APP, WM_CLOSE, WM_DESTROY,
-    WM_HOTKEY, WM_LBUTTONUP, WM_RBUTTONUP, WNDCLASSW, WS_EX_TOOLWINDOW, WS_OVERLAPPED,
+    SetWindowPos, ShowWindow, TrackPopupMenu, TranslateMessage, HICON, HWND_TOP, HWND_TOPMOST,
+    ICONINFO, MF_SEPARATOR, MF_STRING, MSG, SM_CXSMICON, SM_CYSMICON, SWP_NOACTIVATE, SWP_NOMOVE,
+    SWP_NOSIZE, SWP_NOZORDER, SW_HIDE, SW_SHOW, SW_SHOWNOACTIVATE, TPM_RETURNCMD, TPM_RIGHTBUTTON,
+    WM_APP, WM_CLOSE, WM_DESTROY, WM_HOTKEY, WM_LBUTTONUP, WM_RBUTTONUP, WNDCLASSW,
+    WS_EX_TOOLWINDOW, WS_OVERLAPPED,
 };
 
 use crate::audio::Wake;
@@ -71,9 +72,6 @@ const ICON_ID: u32 = 1;
 const MENU_SHOW: usize = 1;
 const MENU_QUIT: usize = 2;
 
-/// How far the panel's top-left lands from the pointer when it is summoned.
-const CURSOR_OFFSET: i32 = 12;
-
 /// Where the panel goes when it is summoned.
 ///
 /// Both answers begin from the monitor the pointer is on, because a widget summoned by
@@ -81,7 +79,7 @@ const CURSOR_OFFSET: i32 = 12;
 /// where *on* that monitor it lands.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Placement {
-    /// Under the pointer, wherever that is — the transient popup.
+    /// Centred on the pointer, wherever that is — the transient popup.
     AtPointer,
     /// Where it was left, measured from its monitor's work area rather than from the
     /// desktop, so "the same place" means the same place on *this* screen. A panel
@@ -127,6 +125,14 @@ struct State {
     last_offset: (AtomicI32, AtomicI32),
     /// Set while the panel is visible; the audio backend polls only then.
     wake: Arc<Wake>,
+    /// `--overlay`: show the panel without taking the foreground from whatever is under
+    /// it. See [`show`], which is where the flag turns into two different calls.
+    ///
+    /// A plain `bool` where everything above it is an atomic, and that is the point:
+    /// every other field here is shared *because it changes*, and this one is decided by
+    /// the command line before the thread starts and never again. Spelling it as an
+    /// atomic would say it moves.
+    overlay: bool,
 }
 
 /// The panel's end of the resident thread. Cheap to clone.
@@ -164,6 +170,18 @@ impl Handle {
             .store(placement == Placement::AtPointer, Ordering::Release);
     }
 
+    /// Whether this run is an overlay: the panel never takes the foreground.
+    ///
+    /// Read from here rather than passed to `App` as an eighth constructor argument.
+    /// Both halves need the same answer — the resident thread to show the window
+    /// without activating it, the panel to stop asking for the focus and to keep
+    /// `WS_EX_NOACTIVATE` asserted — and the resident thread is the half that acts on
+    /// it. Unlike the two chrome toggles there is nothing to keep in step: `--overlay`
+    /// is fixed for the process.
+    pub fn overlay(&self) -> bool {
+        self.0.overlay
+    }
+
     pub fn show(&self) {
         show(&self.0);
     }
@@ -186,7 +204,7 @@ impl Resident {
     /// hotkey is already taken, or where the notification area refuses the icon,
     /// still runs the widget — it is only the ways *in* that are missing, and those
     /// are reported where the user will see them rather than swallowed.
-    pub fn spawn(hotkey: Hotkey, placement: Placement) -> Self {
+    pub fn spawn(hotkey: Hotkey, placement: Placement, overlay: bool) -> Self {
         let state = Arc::new(State {
             panel: AtomicI64::new(0),
             resident: AtomicI64::new(0),
@@ -196,6 +214,7 @@ impl Resident {
             at_pointer: AtomicBool::new(placement == Placement::AtPointer),
             last_offset: (AtomicI32::new(0), AtomicI32::new(0)),
             wake: Arc::new(Wake::new(false)),
+            overlay,
         });
 
         let thread_state = state.clone();
@@ -246,7 +265,8 @@ fn panel(state: &State) -> Option<HWND> {
     Some(HWND(raw as *mut core::ffi::c_void))
 }
 
-/// Show the panel, put it in the foreground, and start the audio poll.
+/// Show the panel, start the audio poll, and — unless this is an `--overlay` run — put
+/// it in the foreground.
 ///
 /// The order matters at the end: `shows` is incremented *before* the window can
 /// paint, so the first frame after an appearance already knows it is a new one.
@@ -268,10 +288,45 @@ fn show(state: &State) {
         state.visible.store(true, Ordering::Release);
         state.shows.fetch_add(1, Ordering::Release);
         state.wake.set(true);
-        let _ = ShowWindow(hwnd, SW_SHOW);
-        // Allowed here where it usually is not: the process that received the last
-        // input event may take the foreground, and a hotkey press is that event.
-        let _ = SetForegroundWindow(hwnd);
+        if state.overlay {
+            // The mode, at the one moment it matters: revealed without being activated,
+            // and not asked for the foreground afterwards. Whatever the user was in keeps
+            // the input queue and, if it is a game running borderless or under Fullscreen
+            // Optimizations, keeps its fullscreen state — there is no activation for it to
+            // be told about.
+            //
+            // This call alone would not hold: the *first click* on the panel would activate
+            // it and take the foreground anyway. `WS_EX_NOACTIVATE` is the half that makes
+            // it stick — see `crate::system::hold_window_styles`.
+            let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+            // And then raise it, which is the other half `SetForegroundWindow` used to do
+            // for nothing. `WS_EX_TOPMOST` buys *membership* of the topmost band and not a
+            // position in it: the band is ordered by when each window last asked, so a game
+            // that went fullscreen after this window was created sits above it and the panel
+            // is composited behind the game. Nothing else in this path touches the z-order —
+            // [`move_into_view`] passes `SWP_NOZORDER`, which makes its `HWND_TOP` a no-op —
+            // so without this the overlay is drawn where nobody can see it.
+            //
+            // `HWND_TOPMOST` rather than `HWND_TOP` because it says both things at once:
+            // stay in the band, and go to the top of it. `SWP_NOACTIVATE` so that raising
+            // does not become a back door into the foreground — that would give the mode
+            // away at the one moment it is being used — and `NOMOVE | NOSIZE` because
+            // placement has already happened, above, while the window was still hidden.
+            let _ = SetWindowPos(
+                hwnd,
+                Some(HWND_TOPMOST),
+                0,
+                0,
+                0,
+                0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+            );
+        } else {
+            let _ = ShowWindow(hwnd, SW_SHOW);
+            // Allowed here where it usually is not: the process that received the last
+            // input event may take the foreground, and a hotkey press is that event.
+            let _ = SetForegroundWindow(hwnd);
+        }
     }
 }
 
@@ -352,20 +407,23 @@ unsafe fn work_area(monitor: HMONITOR) -> Option<RECT> {
     }
 }
 
-/// [`Placement::AtPointer`]: under the pointer, a little down and to the right.
+/// [`Placement::AtPointer`]: centred on the pointer.
 ///
 /// The transient popup — it belongs where the user is looking, which for something
 /// summoned from the keyboard while the pointer sits over whatever is being turned down
-/// is at the pointer. Also the first summon in either mode, because until then the only
-/// position the window has is [`crate::PARKED`].
+/// is at the pointer. Centred rather than dropped below-right of it: the pointer is
+/// already on the thing the user means, so the panel arriving *around* it puts every
+/// control the same short distance away instead of putting the whole panel on one side,
+/// and no summon sends the pointer travelling across it. Also the first summon in either
+/// mode, because until then the only position the window has is [`crate::PARKED`].
 unsafe fn place_at_cursor(hwnd: HWND) {
     let Some(target) = target(hwnd) else {
         return;
     };
     move_into_view(
         hwnd,
-        target.cursor.x + CURSOR_OFFSET,
-        target.cursor.y + CURSOR_OFFSET,
+        target.cursor.x - target.width / 2,
+        target.cursor.y - target.height / 2,
         &target,
     );
 }

@@ -1,8 +1,8 @@
 //! The places this widget has to talk to the operating system directly.
 //!
-//! Two of them are about the window — the outline DWM draws around it, and keeping it out of
-//! the Alt-Tab switcher — one opens the sound page, and one borrows a console this binary is
-//! built never to create.
+//! Two of them are about the window — the outline DWM draws around it, and the extended styles
+//! that keep it out of the Alt-Tab switcher and, under `--overlay`, out of the foreground — one
+//! opens the sound page, and one borrows a console this binary is built never to create.
 
 use std::mem::size_of_val;
 
@@ -16,7 +16,7 @@ use windows::Win32::System::Console::{AttachConsole, ATTACH_PARENT_PROCESS};
 use windows::Win32::UI::Shell::ShellExecuteW;
 use windows::Win32::UI::WindowsAndMessaging::{
     GetWindowLongPtrW, SetWindowLongPtrW, GWL_EXSTYLE, SW_SHOWNORMAL, WS_EX_APPWINDOW,
-    WS_EX_TOOLWINDOW,
+    WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
 };
 
 /// The `HWND` behind an eframe window or creation context, as a plain integer.
@@ -92,7 +92,12 @@ pub fn adopt_window_outline(window: &impl HasWindowHandle, border: egui::Color32
     }
 }
 
-/// Take the window out of Alt-Tab, as well as out of the taskbar.
+/// Re-assert the extended styles this window has to keep.
+///
+/// Two bits, for two unrelated reasons, held by one call because they are held the same
+/// way: read the style back, and write only when something has changed it under us.
+///
+/// # `WS_EX_TOOLWINDOW` — out of Alt-Tab, as well as out of the taskbar
 ///
 /// egui's `with_taskbar(false)` is not enough on its own: winit implements it with
 /// `ITaskbarList::DeleteTab`, which removes the button and leaves the window in the
@@ -103,35 +108,61 @@ pub fn adopt_window_outline(window: &impl HasWindowHandle, border: egui::Color32
 /// desktop but not hidden — see [`crate::PARKED`] — so without this it would sit in
 /// the Alt-Tab list as an entry that switches to nothing at all.
 ///
-/// `WS_EX_TOOLWINDOW` covers both, and it has to be re-asserted rather than set.
+/// # `WS_EX_NOACTIVATE` — `--overlay`, and very nearly the whole of it
+///
+/// A window carrying this bit is never activated by a click, and that one sentence is
+/// the mode: whatever is underneath keeps the foreground, so it receives no
+/// `WM_KILLFOCUS`, loses no graphics device, and — if it is a game running borderless or
+/// under Fullscreen Optimizations — does not fall out of fullscreen to let a volume
+/// slider in front of it. Mouse messages still arrive and `SetCapture` still works,
+/// which is what leaves the sliders and the mute buttons usable without it.
+///
+/// What it costs is the keyboard, completely: a window that cannot be activated cannot
+/// hold the focus, so `Esc`, the focus rings `widgets` draws, and the wheel over the
+/// mixer list all stop working — `WM_MOUSEWHEEL` goes to the focus window, not to the
+/// window under the pointer. That is why this is a mode and not the behaviour: see
+/// `App::hide_on_blur` for the focus requests it turns off, and `--help` for what it
+/// does not do yet.
+///
+/// Cleared when `overlay` is false rather than merely left unasked-for, so that the two
+/// modes are two values of one predicate instead of one value and an absence. This runs
+/// every frame, and a bit that nothing ever takes away is a bit that would outlive the
+/// mode that wanted it.
 ///
 /// # Why every frame
 ///
-/// Setting it once works and then stops being true. Measured: the call from the panel's
-/// constructor reads back correctly and is *reverted afterwards* — winit rewrites the
-/// extended style after the window is built, restoring `WS_EX_APPWINDOW`, which is the
-/// same thing that defeated clearing `WS_CAPTION` earlier in this program's life. A
-/// version of this that stopped at the first success left the widget in the switcher,
-/// and looked like it had worked.
+/// Setting either once works and then stops being true. Measured on `WS_EX_TOOLWINDOW`:
+/// the call from the panel's constructor reads back correctly and is *reverted
+/// afterwards* — winit rewrites the extended style after the window is built, restoring
+/// `WS_EX_APPWINDOW`, which is the same thing that defeated clearing `WS_CAPTION`
+/// earlier in this program's life. A version of this that stopped at the first success
+/// left the widget in the switcher, and looked like it had worked.
 ///
-/// So `App`'s `logic` — the one hook that runs while the window is invisible — calls this on every frame instead. The steady state is
-/// one `GetWindowLongPtrW` — the style is read, found to be right, and nothing is
-/// written — against a toolkit that asserts its own idea of the style whenever it feels
-/// like it. Frames only run while the window is visible or on its way there, which is
-/// exactly when being in Alt-Tab would matter.
-pub fn keep_out_of_alt_tab(window: &impl HasWindowHandle) {
+/// So `App`'s `logic` — the one hook that runs while the window is invisible — calls
+/// this on every frame instead. The steady state is one `GetWindowLongPtrW`: the style
+/// is read, found to be right, and nothing is written, against a toolkit that asserts
+/// its own idea of the style whenever it feels like it. Frames only run while the window
+/// is visible or on its way there, which is exactly when either bit would matter.
+pub fn hold_window_styles(window: &impl HasWindowHandle, overlay: bool) {
     let Some(raw) = window_handle(window) else {
         return;
     };
     let hwnd = HWND(raw as *mut core::ffi::c_void);
-    let tool = WS_EX_TOOLWINDOW.0 as isize;
-    let app = WS_EX_APPWINDOW.0 as isize;
+    let mut wanted = WS_EX_TOOLWINDOW.0 as isize;
+    let mut unwanted = WS_EX_APPWINDOW.0 as isize;
+    // The one bit the mode moves, and it moves *between* the two masks rather than into
+    // one of them, so that leaving `--overlay` off actively says so.
+    if overlay {
+        wanted |= WS_EX_NOACTIVATE.0 as isize;
+    } else {
+        unwanted |= WS_EX_NOACTIVATE.0 as isize;
+    }
     unsafe {
         let current = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
-        if current & tool != 0 && current & app == 0 {
+        if current & wanted == wanted && current & unwanted == 0 {
             return;
         }
-        SetWindowLongPtrW(hwnd, GWL_EXSTYLE, (current & !app) | tool);
+        SetWindowLongPtrW(hwnd, GWL_EXSTYLE, (current & !unwanted) | wanted);
     }
 }
 
