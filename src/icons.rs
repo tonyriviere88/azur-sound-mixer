@@ -353,8 +353,8 @@ pub fn external(p: &Painter, rect: Rect, color: Color32) {
 /// Three horizontal sliders — a mixer, for an application whose own icon could not
 /// be read.
 ///
-/// Horizontal, where the application's own mark ([`crate::mark::paint`]) is three
-/// vertical faders: they are the same idea and they must not be the same glyph, because
+/// Horizontal, where the application's own mark ([`crate::mark`]) is three vertical
+/// faders: they are the same idea and they must not be the same glyph, because
 /// this one stands in a mixer row for "we could not read this program's icon" and that
 /// one names the window it is sitting in.
 pub fn sliders(p: &Painter, rect: Rect, color: Color32) {
@@ -367,53 +367,49 @@ pub fn sliders(p: &Painter, rect: Rect, color: Color32) {
     }
 }
 
-/// The mark's colours, checked against the roles they claim to be.
+/// The mark's plate, checked against the surface it is meant to look like.
 ///
-/// [`crate::mark`] writes the design system's dark-chrome pair as literals, because a
-/// raster mark cannot take a `Color32` from a theme that switches. This is what stops
-/// that from quietly becoming a lie — the brief is explicit that an app's mark uses
-/// palette colours only, and that "an icon blue that is nearly the app's blue is worse
-/// than an obviously different one".
+/// [`crate::mark`] writes the art's two colours as literals, because a render cannot
+/// take a `Color32` from a theme that switches, and the plate's claim is the one worth
+/// pinning: it is the panel's own `bg.layer`, which is why the icon looks like the
+/// window it opens rather than merely being dark too. `mark`'s own tests keep the
+/// literal honest about the art; this keeps it honest about the theme.
 ///
-/// Both are pinned twice: to the palette rung, and to the role in `Theme::dark()` that
-/// the design system's `app-icons/README.md` names for it. The second is the one that
-/// matters — the icon is the panel's own `bg.layer` and `accent.mark`, which is why it
-/// looks like the window it opens rather than merely being near it.
+/// Within a couple of steps rather than equal, which is the difference between this art
+/// and the design system's own: `app-icons/` draws in palette colours and this is a
+/// render whose plate came out at `#14171C` against `GRAY_2`'s `#14171A`. A tolerance
+/// that tight still catches the plate being relit, which is the change that would make
+/// the icon stop matching the panel.
 #[cfg(test)]
 #[test]
-fn the_mark_uses_the_dark_themes_own_colours() {
+fn the_marks_plate_is_the_surface_the_panel_is_drawn_on() {
     use azur_egui_theme::{tokens::palette, Theme};
 
-    let dark = Theme::dark();
     let bytes = |colour: egui::Color32| [colour.r(), colour.g(), colour.b()];
     assert_eq!(
-        crate::mark::PLATE,
         bytes(palette::GRAY_2),
-        "the plate has drifted from palette::GRAY_2"
+        bytes(Theme::dark().bg.layer),
+        "the dark theme's bg.layer is no longer palette::GRAY_2"
     );
-    assert_eq!(
-        crate::mark::PLATE,
-        bytes(dark.bg.layer),
-        "the plate is no longer the dark theme's bg.layer"
-    );
-    assert_eq!(
-        crate::mark::INK,
-        bytes(palette::AZURE_70),
-        "the mark has drifted from palette::AZURE_70"
-    );
-    assert_eq!(
-        crate::mark::INK,
-        bytes(dark.accent.mark),
-        "the mark is no longer the dark theme's accent.mark"
-    );
+    for (channel, (ours, theirs)) in crate::mark::PLATE
+        .iter()
+        .zip(bytes(palette::GRAY_2))
+        .enumerate()
+    {
+        let drift = (*ours as i32 - theirs as i32).abs();
+        assert!(
+            drift <= 2,
+            "the plate's channel {channel} is {drift} off the dark theme's bg.layer"
+        );
+    }
 }
 
 /// And that the pair measures what [`crate::mark`]'s documentation says it measures.
 ///
-/// The design system's `app-icons/README.md` puts the figure at 6.6:1 and this program
-/// repeats it in prose, which makes it a claim of ours too. Pinned rather than merely
-/// floored, because the number is quoted: a change that kept it legible but moved it to
-/// 5.9 would leave two files saying something that is no longer true.
+/// The figure is quoted in prose, which makes it a claim of ours, so it is pinned
+/// rather than merely floored: this pair clears `TEXT` by four tenths, and a relight of
+/// the art that spent them would leave one file saying something that is no longer true
+/// and the icon under the threshold the design system sets for a mark on its own plate.
 #[cfg(test)]
 #[test]
 fn the_marks_two_colours_measure_what_is_claimed_for_them() {
@@ -426,7 +422,7 @@ fn the_marks_two_colours_measure_what_is_claimed_for_them() {
         "the mark is {measured:.2}:1 on its plate, under {TEXT}:1"
     );
     assert!(
-        (measured - 6.6).abs() < 0.05,
-        "the mark measures {measured:.2}:1, and both READMEs say 6.6:1"
+        (measured - 4.9).abs() < 0.05,
+        "the mark measures {measured:.2}:1, and `mark`'s documentation says 4.9:1"
     );
 }

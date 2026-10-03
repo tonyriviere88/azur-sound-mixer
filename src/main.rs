@@ -91,7 +91,8 @@ const PARKED: [f32; 2] = [-30000.0, -30000.0];
 /// The size of the window icon handed to the platform at startup.
 ///
 /// 64 rather than 256: Windows scales this one down itself, and at 64 the mark still
-/// has every detail it draws while costing 16KB instead of 256.
+/// has every detail it can show while costing 16KB instead of 256. It is also the
+/// largest size [`mark`] carries live, so this is an exact hit rather than a round-up.
 const WINDOW_ICON: u32 = 64;
 
 /// What the command line asked for.
@@ -125,6 +126,7 @@ fn main() -> eframe::Result {
     let mut resident = resident::Resident::spawn(options.hotkey.clone(), options.placement);
     let handle = resident.handle();
 
+    let (side, icon) = mark::bitmap(WINDOW_ICON);
     let mut viewport = egui::ViewportBuilder::default()
         .with_title(NAME)
         .with_inner_size(SIZE)
@@ -132,11 +134,11 @@ fn main() -> eframe::Result {
         // The second of the mark's three surfaces. This window is out of the taskbar
         // and out of Alt-Tab, so nothing shows it today — but egui's default is a
         // white `e` on black, and the cost of not having to remember that if the
-        // window ever gains a button is one rasterised bitmap at startup.
+        // window ever gains a button is one copy of a bitmap at startup.
         .with_icon(egui::IconData {
-            rgba: mark::rgba(WINDOW_ICON),
-            width: WINDOW_ICON,
-            height: WINDOW_ICON,
+            rgba: icon.to_vec(),
+            width: side,
+            height: side,
         })
         // Undecorated, so the panel is the whole window rather than the inside of
         // someone else's caption bar; transparent, so the compositor can round the

@@ -48,7 +48,7 @@ use azur_egui_theme::icons as azur_icons;
 use azur_egui_theme::tokens::space;
 use azur_egui_theme::Theme;
 use egui::{
-    pos2, vec2, Align, Layout, Rect, Sense, TextureHandle, TextureOptions, Ui, Vec2,
+    pos2, vec2, Align, Color32, Layout, Rect, Sense, TextureHandle, TextureOptions, Ui, Vec2,
     ViewportCommand,
 };
 
@@ -95,6 +95,16 @@ const GRIP: f32 = 6.0;
 /// The square at each corner, which resizes both axes at once.
 const CORNER: f32 = 14.0;
 
+/// The mark in the header, in logical pixels, inside a box of [`MARK_BOX`].
+///
+/// 16, which is Azur's Part A size for a glyph in a row of them: it sits beside the
+/// close and pin buttons and has to weigh the same as they do.
+const MARK: f32 = 16.0;
+
+/// What the mark is allocated, which is a little more than it draws — the box is the
+/// title's leading edge and the drag region's, and the mark is centred in it.
+const MARK_BOX: f32 = 18.0;
+
 pub struct App {
     theme: Theme,
     audio: AudioController,
@@ -114,6 +124,11 @@ pub struct App {
     /// shares — which is stable for as long as any snapshot still refers to the
     /// process, and gone from every snapshot once it exits.
     textures: HashMap<usize, TextureHandle>,
+    /// This program's own mark in the header, and which of [`crate::mark`]'s sizes it
+    /// was uploaded from. Kept because the display scale can change under a running
+    /// window — dragging it to a second monitor is enough — and the answer is then a
+    /// different bitmap rather than the same one stretched.
+    mark: Option<(u32, TextureHandle)>,
     /// Smoothed meter levels, by session key. Swept alongside the textures.
     peaks: HashMap<String, f32>,
     echo: Echo,
@@ -180,6 +195,7 @@ impl App {
             stay_open,
             placement,
             textures: HashMap::new(),
+            mark: None,
             peaks: HashMap::new(),
             echo: Echo::default(),
             output_pick: None,
@@ -540,15 +556,19 @@ impl App {
             })
             .show(ui, |ui| {
                 let row = ui.horizontal(|ui| {
-                    // The mark's third form, under Azur's Part A rules: 16px, one
-                    // theme colour, and no plate — the header is already a surface.
-                    // The same three faders as the tray icon and the `.exe`, from the
-                    // same primitives, painted rather than rasterised.
-                    let (glyph, _) = ui.allocate_exact_size(Vec2::splat(18.0), Sense::hover());
-                    crate::mark::paint(
-                        ui.painter(),
-                        Rect::from_center_size(glyph.center(), Vec2::splat(16.0)),
-                        self.theme.text.primary,
+                    // The mark's third surface: the same art as the tray icon and the
+                    // `.exe`, from the same bitmaps, at the size this display scale
+                    // draws 16 logical pixels as. Its own plate rather than a theme
+                    // colour — the art is a render and cannot be recoloured, and on
+                    // this header the near-black plate all but disappears, which
+                    // leaves the faders reading as the glyph they would have been.
+                    let (glyph, _) = ui.allocate_exact_size(Vec2::splat(MARK_BOX), Sense::hover());
+                    let mark = self.mark_texture(ui.ctx());
+                    ui.painter().image(
+                        mark.id(),
+                        Rect::from_center_size(glyph.center(), Vec2::splat(MARK)),
+                        Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)),
+                        Color32::WHITE,
                     );
                     let name = ui.add(Text::new(crate::NAME).variant(TextVariant::BodyStrong));
                     // Handed out to be made draggable below, once the row's height is
@@ -1092,6 +1112,30 @@ impl App {
                 ctx.load_texture(format!("app-icon-{key}"), image, TextureOptions::LINEAR)
             })
             .clone()
+    }
+
+    /// This program's own mark, uploaded at the size the header actually draws it.
+    ///
+    /// Picked off the display scale rather than uploaded once at the largest size:
+    /// egui samples a texture bilinearly and has no mipmaps, so a 64px bitmap drawn
+    /// into 16 logical pixels is four pixels of every sixteen and the faders come and
+    /// go with the window's position. Asking [`crate::mark`] for the physical size
+    /// instead gets a bitmap that was scaled to it properly, once, at build time.
+    fn mark_texture(&mut self, ctx: &egui::Context) -> TextureHandle {
+        let wanted = (MARK * ctx.pixels_per_point()).round().max(1.0) as u32;
+        let (size, pixels) = crate::mark::bitmap(wanted);
+        match &self.mark {
+            Some((uploaded, texture)) if *uploaded == size => texture.clone(),
+            _ => {
+                let image = egui::ColorImage::from_rgba_unmultiplied([size as usize; 2], pixels);
+                // Linear, because 16 logical pixels is 24 physical ones at 150% and
+                // the nearest size up is 24 — but at 175% it is 28 physical from a 28,
+                // and every scale in between lands off a whole ratio.
+                let texture = ctx.load_texture("app-mark", image, TextureOptions::LINEAR);
+                self.mark = Some((size, texture.clone()));
+                texture
+            }
+        }
     }
 
     /// Advance every meter, and forget the ones whose session is gone.

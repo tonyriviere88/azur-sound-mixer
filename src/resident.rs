@@ -729,8 +729,9 @@ fn write_utf16(field: &mut [u16], text: &str) {
 /// Not the system's own volume icon, which `SndVolSSO.dll` would have handed over
 /// for two lines of code — because that speaker is already sitting in the notification
 /// area three places along, and an icon a user cannot tell from Windows' own is worse
-/// than no icon at all. The design system's mixer is three faders for that reason
-/// among others: it is not any of the glyphs the shell already puts in this strip.
+/// than no icon at all. The mark is three faders on a plate for that reason among
+/// others: whatever the speaker tucked under them says, it is not any of the glyphs
+/// the shell already puts in this strip.
 ///
 /// [`crate::mark`] instead, which is the same art the executable carries in its
 /// resources. The plate is what makes it legible here rather than a decoration: the
@@ -739,12 +740,14 @@ fn write_utf16(field: &mut [u16], text: &str) {
 /// the reason Azur's brief puts the mark on a plate instead of shipping bare ink.
 ///
 /// `SM_CXSMICON` follows the display scale, so this is 16px at 100% and 24 at 150% —
-/// and because the mark is redrawn per size rather than scaled, the 16 is the 16 the
-/// brief asks for rather than a shrunken 256.
+/// and because `assets/` holds a bitmap per size rather than one to scale, the 16 is a
+/// 16 that was drawn as one rather than a shrunken 256. The size comes back from
+/// [`crate::mark::bitmap`] because a metric between two of them rounds up.
 fn tray_icon() -> HICON {
-    let size =
+    let wanted =
         unsafe { GetSystemMetrics(SM_CXSMICON).max(GetSystemMetrics(SM_CYSMICON)) }.max(16) as u32;
-    let pixels = premultiplied_bgra(&crate::mark::rgba(size));
+    let (size, art) = crate::mark::bitmap(wanted);
+    let pixels = premultiplied_bgra(art);
 
     unsafe {
         // A 32bpp BGRA colour bitmap with a full alpha channel, and an empty mask —

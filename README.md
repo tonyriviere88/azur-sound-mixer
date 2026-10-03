@@ -21,8 +21,8 @@ Rust, [egui](https://github.com/emilk/egui) 0.35, and the
 [Azur design system](../azur-egui-theme) for every colour, radius and type step — its
 opt-in [`desktop`](../azur-egui-theme/src/desktop.rs) layer for the decisions a dense
 application window makes, its [`render`](../azur-egui-theme/src/render.rs) module for the
-graphics backend, and its [icon brief](../azur-egui-theme/docs/icons.md) for the
-application's own mark, rather than inventing a look.
+graphics backend, and its [icon brief](../azur-egui-theme/docs/icons.md) for how the
+application's own mark reaches its three surfaces, rather than inventing a look.
 Windows only: the backend is Core Audio, and per-application volume has no
 equivalent elsewhere that a stub could stand in for.
 
@@ -51,7 +51,7 @@ slider in Windows' own mixer, and this moves.
 | Backend | [`audio`](src/audio/) | Core Audio, COM, processes. Nothing about egui. |
 | Resident | [`resident`](src/resident.rs) | The tray icon, the hotkey, and the panel's `HWND`. Nothing about what the panel contains. |
 | Widget | [`app`](src/app.rs) | Snapshots and commands. Nothing about COM. |
-| Glyphs | [`icons`](src/icons.rs), [`widgets`](src/widgets.rs), [`mark`](src/mark.rs) | Azur roles, and an `egui::Painter` — or, for the mark, a pixel buffer. The mark's art is the design system's, not ours. |
+| Glyphs | [`icons`](src/icons.rs), [`widgets`](src/widgets.rs), [`mark`](src/mark.rs) | Azur roles, and an `egui::Painter` — or, for the mark, a table of bitmaps unpacked at build time. |
 
 The boundary in the middle is a thread. Core Audio calls block — enumerating
 endpoints talks to the audio service, and a device being reconfigured can take
@@ -121,71 +121,72 @@ messages, which is the asymmetry the whole module is built around.
 
 ## The mark
 
-**The art is not this program's.** `azur-egui-theme/app-icons/` ships a drawn icon per
-application — a task manager, a file explorer, a program launcher, and an audio mixer.
-This is the audio mixer: three faders on a dark plate, knobs at three settings.
+Three faders with a speaker tucked under them, blue on a near-black plate. The art is a
+render rather than a drawing, and it lives in [`assets/`](assets/) as one PNG per size —
+[`assets/icons.py`](assets/icons.py) cuts them out of it, by hand and not as part of the
+build.
 
-One drawing, three surfaces, which is what Azur's
+One image, ten sizes, three surfaces, which is what Azur's
 [icon brief](../azur-egui-theme/docs/icons.md) (Part B) asks for:
 
 | surface | how it gets there |
 | --- | --- |
-| Explorer, shortcuts, a pinned taskbar button | [`build.rs`](build.rs) copies the design system's `app.ico` into `assets/` and the linker embeds it |
-| the notification area, and the window icon | [`mark::rgba`](src/mark.rs) at run time, at the size `SM_CXSMICON` asks for |
-| the panel's own header, 16px | [`mark::paint`](src/mark.rs) — the same primitives through Azur's `Pen`: one theme colour, no plate |
+| Explorer, shortcuts, a pinned taskbar button | [`build.rs`](build.rs) assembles the ten PNGs into `assets/app.ico` and the linker embeds it |
+| the notification area, and the window icon | [`mark::bitmap`](src/mark.rs) at run time, at the size `SM_CXSMICON` asks for |
+| the panel's own header, 16px | [`mark::bitmap`](src/mark.rs) again, uploaded as a texture at the size the display scale draws it |
 
-`GRAY_2` plate, `AZURE_70` faders, rounded at 25% of the side. That is the brief's
-**dark chrome** pair from its section 15, and both halves are *roles* rather than
-shades: the plate is the dark theme's `bg.layer` and the mark is its `accent.mark`, at
-6.6:1. The icon is in the same paint as the panel it opens, and a test in
-[`icons`](src/icons.rs) pins both twice — to the palette rung and to the role in
-`Theme::dark()` — so neither can quietly become a shade that is nearly right.
+The plate is `#14171C`, which is two steps of blue off `GRAY_2` — the dark theme's
+`bg.layer`, the panel's own surface, so the icon is very nearly the colour of the window
+it opens, and a test in [`icons`](src/icons.rs) holds it there. The faders are `#3682FB`,
+and that one is *not* a token: `accent.mark` is `#3AA0FF` and the render's blue is deeper
+than it. The brief's own line — an icon blue that is nearly the app's blue is worse than
+an obviously different one — is why it is written down as its own colour rather than
+rounded to the rung it is near. On the plate it measures **4.9:1**, which clears
+`contrast::TEXT` where the old drawn pair had 6.6:1 to spare.
 
-What that pair costs is worth knowing, and the design system says it out loud: `GRAY_2`
-against Windows 11's dark taskbar is **1.1:1**. On a light taskbar this is a deliberate
-dark tile at 16.6:1; on a dark one the plate all but disappears and the icon reads as a
-blue mark floating on the chrome — which is how a good many Windows 11 icons look, and
-here it is a choice rather than an accident. `app-icons/README.md` names the two ways
-out (lift the plate to `GRAY_4`, or give it a one-pixel rim) and points at the one
-constant that does it. That constant is upstream, which is where the decision belongs:
-changing it here would fork this icon from the four it is a set with.
+What the plate costs is worth knowing: near-black against Windows 11's dark taskbar is
+about **1.1:1**. On a light taskbar this is a deliberate dark tile; on a dark one the
+plate all but disappears and the icon reads as blue faders floating on the chrome — which
+is how a good many Windows 11 icons look, and here it is the art's own choice rather than
+an accident.
 
-### Two media, two answers
+### One pipeline, two media
 
-- **The `.ico` is copied, not generated.** Taking the shipped file means the executable
-  carries the design system's own bytes — verified: its nine `RT_ICON` resources are
-  341, 485, 572, 835, 854, 1084, 1623, 3180 and 6643 bytes, which is the shipped PNGs
-  one for one. They are PNG-compressed, so that is 15KB of resources where re-encoding
-  the same images as uncompressed BMP entries was 360KB.
-- **The pixels are computed.** The other two surfaces cannot be a file: the notification
-  area wants an `HICON` at `SM_CXSMICON` — 16, 20, 24 or 32px, decided by the display
-  scale while the program is running — and the window icon wants straight RGBA. So
-  [`mark`](src/mark.rs) carries the geometry from `app-icons/marks.rs` and the rules
-  from `examples/app_icons.rs`, and rasterises them, rather than putting a PNG decoder
-  in the dependency graph of a binary built with `opt-level = "s"` for the sake of two
-  bitmaps.
+Ten PNGs — 16, 20, 24, 28, 32, 40, 48, 64, 128 and 256 — are the whole source of truth,
+and `build.rs` splits them two ways:
 
-Transcribing art is how art drifts, so it is not left as a claim:
-`mark::tests::the_art_is_the_design_systems` decodes the shipped PNGs and compares all
-nine sizes **pixel for pixel**. If the design system redraws its mixer, or changes the
-plate, the corner, the stroke floor or the snapping rule, that test names the size and
-the pixel — and the answer is to bring the transcription back into line, never to move
-the expectation. It is the one thing the `png` dev-dependency is there for; nothing in
-the shipped binary decodes a PNG.
+- **The `.ico` is assembled from them verbatim.** An `.ico` is a header, a table and a
+  run of payloads, and since Vista each payload may be a whole PNG file. So there is no
+  encoder in the build: the bytes Explorer decodes are byte for byte the bytes
+  `icons.py` wrote, and the file is 102KB where the same ten images as uncompressed BMP
+  entries would be 363KB. `mark::tests::the_ico_holds_every_size` parses the header back
+  and checks every entry against the file it came from — it is the one surface with no
+  run-time check at all, on a machine that is not this one.
+- **The small sizes' pixels are unpacked at build time.** The other two surfaces cannot
+  be a file: the notification area wants an `HICON` at `SM_CXSMICON` — 16, 20, 24, 28,
+  32, 40, 48 or 64px, decided by the display scale while the program is running — and
+  the window icon and the header texture want straight RGBA. So `build.rs` decodes those
+  eight into `$OUT_DIR` and [`mark`](src/mark.rs) `include_bytes!`s them, rather than
+  putting a PNG decoder in the dependency graph of a binary built with
+  `opt-level = "s"`. It costs 44KB of `.rodata` and nothing at startup; the 128 and the
+  256, which only the shell reads, stay compressed in the `.ico`. `png` is a *build*
+  dependency for that decode and a dev-dependency for the test that the pixels in the
+  binary are the pixels in `assets/` — nothing in the shipped binary decodes a PNG.
 
-"Redraw for the small sizes" is the rule that shaped the rasteriser, and it is two
-lines rather than nine drawings: a 1.3-unit stroke is 1.3px at 16 and would read as
-grey, so under 32px the weight is floored at 2px; and whole-pixel edges are only worth
-having if the weight is a whole number too, so up to 48px every axis-aligned edge is
-snapped and the stroke is rounded — 2, 2, 2, 3, 3, 4, then 5.2, 10.4 and 20.8 free. At
-16px that puts the three tracks on pixel columns 3–4, 7–8 and 11–12, with a two-pixel
-gap either side; a gap that rounded away would fuse three faders into one wide bar.
+**One bitmap per size, not one master scaled.** 16px is not a small 64px: each size was
+reduced from the render with its own filter pass, and the ones at or under 64 were
+sharpened afterwards, which at 16px is the difference between three knobs and three
+smudges. So `mark::bitmap` hands back the size it actually has along with the pixels, and
+rounds *up* when asked for something in between — a 40px icon shown at 36 is soft, where
+a 32px one shown at 36 is soft and blocky. The header asks it for `16 * pixels_per_point`
+for the same reason: egui samples a texture bilinearly and keeps no mipmaps, so one 64px
+upload drawn into 16 logical pixels would lose the faders and find them again every time
+the window changed monitors.
 
-The header's copy is the same primitives through `Pen`, so the two cannot disagree.
 `icons::sliders` — the stand-in for an application whose own icon could not be read —
-stays *horizontal* on purpose: it is the same idea and it must not be the same glyph,
-because one of them means "we could not read this program" and the other names the
-window it is sitting in.
+stays *horizontal* on purpose: it is the same idea as the mark and it must not be the
+same glyph, because one of them means "we could not read this program" and the other
+names the window it is sitting in.
 
 Two things about the branding that are the shell's to decide, not ours:
 
@@ -367,7 +368,7 @@ of a shape. `accent.mark` is the same hue kept where it works: **6.56:1**.
 
 `widgets.rs`'s tests now measure every glyph on every fill it can be drawn on — at rest on
 the panel, and lit on the hover and press fills — plus the two fills against each other,
-and the mark on its plate against the 6.6:1 both READMEs claim for it.
+and the mark on its plate against the 4.9:1 [The mark](#the-mark) claims for it.
 
 ## Density
 

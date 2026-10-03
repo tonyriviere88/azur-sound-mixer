@@ -9,8 +9,12 @@ publish = false
 [build-dependencies]
 # The `.ico` that Explorer and a pinned shortcut show has to be in the
 # executable's PE resources, which means the linker, which means a build script.
-# `build.rs` draws the icon from `src/mark.rs` and hands the file to this.
+# `build.rs` assembles the file from `assets/app-*.png` and hands it to this.
 winresource = "0.1"
+# Decoding those same PNGs into the raw pixels `src/mark.rs` carries for the tray
+# and the window icon. A build dependency and deliberately only that: doing it here
+# is what keeps a PNG decoder out of the shipped binary -- see `mark`.
+png = "0.18"
 
 [dependencies]
 # The Azur design system as an egui theme. Its egui and ours have to be the same
@@ -34,10 +38,10 @@ eframe = { version = "0.35", default-features = false, features = [
 ] }
 
 [dev-dependencies]
-# Tests only, and for one job: decoding the PNGs the design system ships beside its
-# `app.ico`, so `mark.rs` can assert that what it draws at run time is that icon
-# pixel for pixel rather than a second drawing that resembles it. Nothing in the
-# shipped binary decodes a PNG -- see `mark`.
+# Tests only, and for one job: decoding `assets/app-*.png`, so `mark.rs` can assert
+# that the pixels the binary carries are the art in the tree rather than whatever
+# `build.rs` last happened to write. Nothing in the shipped binary decodes a PNG --
+# see `mark`.
 png = "0.18"
 
 [target.'cfg(windows)'.dependencies]
