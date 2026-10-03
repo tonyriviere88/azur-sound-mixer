@@ -233,31 +233,6 @@ fn glow_notice(set: bool) -> Option<&'static str> {
     )
 }
 
-#[cfg(test)]
-mod tests {
-    /// A retired override name is diagnosed, not silently ignored.
-    ///
-    /// The half of this that cannot regress is already enforced by the compiler —
-    /// `eframe::Renderer` has one variant now, so nothing can route `AZUR_GLOW` back to
-    /// a painter that is not compiled in. What this covers is the other half: that the
-    /// variable does not become *silently* inert, which is the failure mode where
-    /// somebody keeps it in a shortcut for years believing it does something.
-    #[test]
-    fn azur_glow_is_reported_as_retired_rather_than_ignored() {
-        let notice = super::glow_notice(true).expect("a set AZUR_GLOW is reported");
-        assert!(notice.contains("AZUR_GLOW"), "names the variable: {notice}");
-        assert!(
-            notice.contains("no longer does anything"),
-            "says it is inert rather than describing a setting: {notice}"
-        );
-        assert_eq!(
-            super::glow_notice(false),
-            None,
-            "nothing is printed when the variable is not set"
-        );
-    }
-}
-
 /// Read the command line.
 ///
 /// Hand-rolled rather than a parser crate: four flags, one of which takes a value,
@@ -308,4 +283,29 @@ fn parse_arguments() -> Result<Options, String> {
         }
     }
     Ok(options)
+}
+
+#[cfg(test)]
+mod tests {
+    /// A retired override name is diagnosed, not silently ignored.
+    ///
+    /// The half of this that cannot regress is already enforced by the compiler —
+    /// `eframe::Renderer` has one variant now, so nothing can route `AZUR_GLOW` back to
+    /// a painter that is not compiled in. What this covers is the other half: that the
+    /// variable does not become *silently* inert, which is the failure mode where
+    /// somebody keeps it in a shortcut for years believing it does something.
+    #[test]
+    fn azur_glow_is_reported_as_retired_rather_than_ignored() {
+        let notice = super::glow_notice(true).expect("a set AZUR_GLOW is reported");
+        assert!(notice.contains("AZUR_GLOW"), "names the variable: {notice}");
+        assert!(
+            notice.contains("no longer does anything"),
+            "says it is inert rather than describing a setting: {notice}"
+        );
+        assert_eq!(
+            super::glow_notice(false),
+            None,
+            "nothing is printed when the variable is not set"
+        );
+    }
 }

@@ -135,14 +135,26 @@ One image, ten sizes, three surfaces, which is what Azur's
 | the notification area, and the window icon | [`mark::bitmap`](src/mark.rs) at run time, at the size `SM_CXSMICON` asks for |
 | the panel's own header, 16px | [`mark::bitmap`](src/mark.rs) again, uploaded as a texture at the size the display scale draws it |
 
-The plate is `#14171C`, which is two steps of blue off `GRAY_2` — the dark theme's
-`bg.layer`, the panel's own surface, so the icon is very nearly the colour of the window
-it opens, and a test in [`icons`](src/icons.rs) holds it there. The faders are `#3682FB`,
-and that one is *not* a token: `accent.mark` is `#3AA0FF` and the render's blue is deeper
-than it. The brief's own line — an icon blue that is nearly the app's blue is worse than
-an obviously different one — is why it is written down as its own colour rather than
-rounded to the rung it is near. On the plate it measures **4.9:1**, which clears
-`contrast::TEXT` where the old drawn pair had 6.6:1 to spare.
+The plate is a **vertical gradient**, about `#232529` across the top down to `#16181C` at
+the bottom, and it passes through `#14171C` — two steps of blue off `GRAY_2`, the dark
+theme's `bg.layer` and the panel's own surface — near its lower edge. So the icon is very
+nearly the colour of the window it opens along one band of the tile rather than all of it,
+and a test in [`icons`](src/icons.rs) holds that band there. The faders are `#1E7CFB`, and
+that one is *not* a token: `accent.mark` is `#3AA0FF` and the render's blue is deeper than
+it. The brief's own line — an icon blue that is nearly the app's blue is worse than an
+obviously different one — is why it is written down as its own colour rather than rounded
+to the rung it is near.
+
+**The mark does not clear `contrast::TEXT` where it sits, and that is a decision rather
+than an oversight.** On the plate's darkest band the pair measures 4.6:1; against the
+plate immediately behind the knobs it is 4.3:1, and against the lightest band the topmost
+knob sits on, **3.9:1** — taken over every knob-face pixel against the plate row behind
+it, the median is 4.2:1 and four fifths are under 4.5. The previous render, a flat plate
+and a lighter blue, was 4.9:1 everywhere and the drawn pair before it 6.6:1. `TEXT` is
+WCAG AA for a line of body text, an application icon is not read, and this art was chosen
+for how it looks at 16px in a notification area — so the shortfall is accepted, written
+down in [`mark`](src/mark.rs), and pinned from both sides by a test so that a future
+relight cannot move it without saying so.
 
 What the plate costs is worth knowing: near-black against Windows 11's dark taskbar is
 about **1.1:1**. On a light taskbar this is a deliberate dark tile; on a dark one the
@@ -368,7 +380,9 @@ of a shape. `accent.mark` is the same hue kept where it works: **6.56:1**.
 
 `widgets.rs`'s tests now measure every glyph on every fill it can be drawn on — at rest on
 the panel, and lit on the hover and press fills — plus the two fills against each other,
-and the mark on its plate against the 4.9:1 [The mark](#the-mark) claims for it.
+and the mark against both ends of its plate's gradient: the 4.6:1 and the 3.9:1
+[The mark](#the-mark) claims for it, each pinned from both sides so neither the figure nor
+the accepted shortfall can drift.
 
 ## Density
 

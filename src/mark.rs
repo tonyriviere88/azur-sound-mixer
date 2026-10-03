@@ -28,30 +28,63 @@
 //!
 //! # Colour
 //!
-//! [`PLATE`] is `#14171C`, two steps of blue off `palette::GRAY_2` — the dark theme's
-//! `bg.layer`, the panel's own surface. The icon really is the colour of the window it
-//! opens, which is checked in [`crate::icons`] rather than claimed here.
+//! The plate is **lit as a vertical gradient**, which is the fact the other three
+//! paragraphs follow from. It runs about `#232529` across the top, where the faders
+//! begin, down to about `#16181C` at the bottom, and it passes through [`PLATE`] —
+//! `#14171C`, two steps of blue off `palette::GRAY_2`, the dark theme's `bg.layer` and
+//! the panel's own surface — only near its lower edge. So "the icon is the colour of
+//! the window it opens" is now true of one band of it rather than of the tile;
+//! [`crate::icons`] checks the band against the theme, and [`PLATE_LIT`] is the other
+//! end of the gradient, named for the same reason [`PLATE`] is.
 //!
-//! [`INK`] is `#3682FB`, the face of the middle knob. It is **not** the design
+//! [`INK`] is `#1E7CFB`, the face of the middle knob. It is **not** the design
 //! system's `accent.mark` (`AZURE_70`, `#3AA0FF`): the render's blue is deeper and
 //! more saturated, and the brief's own line — that an icon blue nearly the app's blue
 //! is worse than an obviously different one — is why this is written down instead of
-//! being rounded to the token it is near. On the plate it measures 4.9:1, which
-//! clears the design system's `contrast::TEXT` with little to spare — the old pair
-//! managed 6.6:1 — and [`crate::icons`] pins the figure so the prose cannot drift.
+//! being rounded to the token it is near.
+//!
+//! **What it measures, and the exception that was taken.** On [`PLATE`] the pair is
+//! 4.6:1, which clears the design system's `contrast::TEXT` of 4.5:1 — but that is the
+//! plate's darkest band and the knobs do not sit on it. Against the plate immediately
+//! behind them the mark measures 4.3:1, and against the lightest band it reaches
+//! ([`PLATE_LIT`], where the topmost knob sits) **3.9:1**; taken over every knob-face
+//! pixel against the plate row behind it, the median is 4.2:1 and four fifths of them
+//! are under 4.5. The previous render — a flat plate and a lighter blue — was 4.9:1
+//! everywhere, and the one before it 6.6:1.
+//!
+//! That is a **deliberate exception to `contrast::TEXT`, not a pass**: `TEXT` is WCAG AA
+//! for a line of body text, an application icon is not read, and the art was chosen for
+//! how it looks at 16px in a notification area. It is written down here, and pinned in
+//! [`crate::icons`] at both ends, precisely because it is an exception — the next person
+//! to relight this render should see the figure it is being held to rather than
+//! rediscover the threshold and assume the icon meets it.
 //!
 //! What the plate costs is worth knowing: near-black on Windows 11's dark taskbar is
 //! about 1.1:1. On a light taskbar this is a deliberate dark tile; on a dark one the
 //! plate disappears and the icon reads as blue faders floating on the chrome — which
 //! is how a good many Windows 11 icons look, and here it is the art's own choice.
 
-/// `#14171C` — the plate. Two steps of blue off the dark theme's `bg.layer`.
+/// `#14171C` — the plate's darkest band, at its lower edge. Two steps of blue off the
+/// dark theme's `bg.layer`.
+///
+/// The band the gradient passes through rather than the colour of the plate, which the
+/// render lights from `#232529` down; [`PLATE_LIT`] is the other end. This is the end
+/// that matches the panel, and the end the contrast figure flatters — see the module
+/// documentation for both.
 ///
 /// Not drawn with; see [`INK`].
 #[allow(dead_code)]
 pub const PLATE: [u8; 3] = [0x14, 0x17, 0x1c];
 
-/// `#3682FB` — the face of the middle knob, and the icon's blue.
+/// `#232529` — the lightest band of the plate that the mark is drawn on, across the top.
+///
+/// Named so the gradient has two measured ends instead of one and a paragraph. This is
+/// the worst case for legibility and the one the exception in [`crate::icons`] is pinned
+/// against: it is where the topmost knob sits, and where the pair measures 3.9:1.
+#[allow(dead_code)]
+pub const PLATE_LIT: [u8; 3] = [0x23, 0x25, 0x29];
+
+/// `#1E7CFB` — the face of the middle knob, and the icon's blue.
 ///
 /// Neither this nor [`PLATE`] is drawn with, which is what the compiler has to be told
 /// to accept: the art carries its own colour, and both are here to be *checked*. The
@@ -59,7 +92,7 @@ pub const PLATE: [u8; 3] = [0x14, 0x17, 0x1c];
 /// theme and against each other. Two constants nothing reads are the price of the
 /// paragraphs above them not being able to rot.
 #[allow(dead_code)]
-pub const INK: [u8; 3] = [0x36, 0x82, 0xfb];
+pub const INK: [u8; 3] = [0x1e, 0x7c, 0xfb];
 
 /// Every size the binary carries, ascending — `SM_CXSMICON` at each display scale from
 /// 100% to 400%, and the 64 the window icon is handed at startup.
@@ -246,14 +279,26 @@ mod tests {
     /// measure these two against the theme and against each other — so if they are not
     /// in the art, three files are describing an icon that no longer exists.
     ///
-    /// The plate is exact: it is a flat fill, and it survives every downscale. The ink
-    /// is within a few steps, because it never survives one — the small sizes are a
-    /// 20:1 reduction through an unsharp mask, and no pixel of a gradient comes out of
-    /// that untouched. What the tolerance still catches is the art being redrawn in a
-    /// different colour, which is the thing worth catching.
+    /// Both are within a few steps rather than exact, and the plate's tolerance is the
+    /// newer of the two: it used to be `0`, because the plate used to be a flat fill
+    /// that survived every downscale. **The current render lights it as a vertical
+    /// gradient** — about `#212227` at the top to `#16181C` at the bottom — so [`PLATE`]
+    /// is the value that gradient passes through rather than the colour of every plate
+    /// pixel, and at three of the eight sizes the nearest pixel to it lands one step
+    /// away. The ink was never exact, for its own reason: the small sizes are a 20:1
+    /// reduction through an unsharp mask, and no pixel of a gradient comes out of that
+    /// untouched.
+    ///
+    /// What both tolerances still catch is the art being redrawn in a *different*
+    /// colour, which is the thing worth catching — and note what they cannot catch,
+    /// since it has now happened once: a gradient that keeps passing through [`PLATE`]
+    /// while most of its area sits well off it. See [`crate::icons`] for the pair's
+    /// contrast, which is where that shows up.
     #[test]
     fn the_art_is_drawn_in_the_colours_this_module_names() {
         const SLACK: i32 = 12;
+        /// The gradient costs the plate its exactness; see the note above.
+        const PLATE_SLACK: i32 = 2;
         for (size, pixels) in SIZES.iter().copied().zip(BITMAPS) {
             let nearest = |to: [u8; 3]| {
                 pixels
@@ -268,7 +313,13 @@ mod tests {
                     .min()
                     .expect("a non-empty icon")
             };
-            assert_eq!(nearest(PLATE), 0, "{size}px: the plate is not PLATE");
+            for (name, colour) in [("PLATE", PLATE), ("PLATE_LIT", PLATE_LIT)] {
+                let off = nearest(colour);
+                assert!(
+                    off <= PLATE_SLACK,
+                    "{size}px: the nearest pixel to {name} is {off} off"
+                );
+            }
             let ink = nearest(INK);
             assert!(ink <= SLACK, "{size}px: the nearest blue to INK is {ink} off");
         }

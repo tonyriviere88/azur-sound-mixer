@@ -377,9 +377,13 @@ pub fn sliders(p: &Painter, rect: Rect, color: Color32) {
 ///
 /// Within a couple of steps rather than equal, which is the difference between this art
 /// and the design system's own: `app-icons/` draws in palette colours and this is a
-/// render whose plate came out at `#14171C` against `GRAY_2`'s `#14171A`. A tolerance
-/// that tight still catches the plate being relit, which is the change that would make
-/// the icon stop matching the panel.
+/// render whose plate passes through `#14171C` against `GRAY_2`'s `#14171A`.
+///
+/// **It passes through it rather than being it.** The current render lights the plate as
+/// a vertical gradient and [`crate::mark::PLATE`] is its darkest band, so what this test
+/// says is that the band of the tile which matches the panel really does match it — not
+/// that the tile does. [`crate::mark::PLATE_LIT`] is the other end, six steps lighter,
+/// and the test below is where that end is held to account.
 #[cfg(test)]
 #[test]
 fn the_marks_plate_is_the_surface_the_panel_is_drawn_on() {
@@ -404,25 +408,48 @@ fn the_marks_plate_is_the_surface_the_panel_is_drawn_on() {
     }
 }
 
-/// And that the pair measures what [`crate::mark`]'s documentation says it measures.
+/// And that the pair measures what [`crate::mark`]'s documentation says it measures — at
+/// **both** ends of the plate's gradient, because only one of them clears the threshold.
 ///
-/// The figure is quoted in prose, which makes it a claim of ours, so it is pinned
-/// rather than merely floored: this pair clears `TEXT` by four tenths, and a relight of
-/// the art that spent them would leave one file saying something that is no longer true
-/// and the icon under the threshold the design system sets for a mark on its own plate.
+/// The figures are quoted in prose, which makes them claims of ours, so they are pinned
+/// from both sides rather than floored. What is deliberately *not* asserted here is
+/// `measured >= TEXT` across the art: on [`crate::mark::PLATE`] the pair clears it by a
+/// tenth, but on [`crate::mark::PLATE_LIT`] — the band the topmost knob actually sits on
+/// — it is 3.9:1, and asserting compliance against the darkest band while the mark lives
+/// on the lightest would be this test flattering the art instead of measuring it. That
+/// gap is the exception recorded in [`crate::mark`]'s documentation: `TEXT` is WCAG AA
+/// for body text, and an application icon is not read.
+///
+/// So the assertion is that both figures are *what we say they are*. A relight that
+/// moved either one — in either direction, including one that fixed the shortfall —
+/// would leave two files describing an icon that no longer exists, which is the whole
+/// job of this test.
 #[cfg(test)]
 #[test]
 fn the_marks_two_colours_measure_what_is_claimed_for_them() {
     use azur_egui_theme::contrast::{ratio, TEXT};
 
     let colour = |[r, g, b]: [u8; 3]| egui::Color32::from_rgb(r, g, b);
-    let measured = ratio(colour(crate::mark::INK), colour(crate::mark::PLATE));
+    let ink = colour(crate::mark::INK);
+
+    let dark = ratio(ink, colour(crate::mark::PLATE));
     assert!(
-        measured >= TEXT,
-        "the mark is {measured:.2}:1 on its plate, under {TEXT}:1"
+        (dark - 4.56).abs() < 0.05,
+        "the mark measures {dark:.2}:1 on PLATE, and `mark` says 4.6:1"
     );
     assert!(
-        (measured - 4.9).abs() < 0.05,
-        "the mark measures {measured:.2}:1, and `mark`'s documentation says 4.9:1"
+        dark >= TEXT,
+        "PLATE is the one band that clears {TEXT}:1, and it now measures {dark:.2}:1"
+    );
+
+    let lit = ratio(ink, colour(crate::mark::PLATE_LIT));
+    assert!(
+        (lit - 3.90).abs() < 0.05,
+        "the mark measures {lit:.2}:1 on PLATE_LIT, and `mark` says 3.9:1"
+    );
+    assert!(
+        lit < TEXT,
+        "PLATE_LIT now measures {lit:.2}:1, which clears {TEXT}:1 — the exception \
+         recorded in `mark` has been fixed, and both files should say so"
     );
 }
