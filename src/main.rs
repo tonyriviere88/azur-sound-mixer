@@ -11,7 +11,14 @@
 //! azur-audio-switcher --no-stay-open       hides itself when it loses the focus
 //! azur-audio-switcher --at-pointer         opens under the mouse, not where you left it
 //! azur-audio-switcher --hotkey ctrl+alt+f9 some other keystroke
+//! azur-audio-switcher --profile test       its own settings and favourites
 //! ```
+//!
+//! The panel's two header toggles are remembered between runs — see [`settings`] — and a
+//! flag that sets one of them (`--no-stay-open`, `--at-pointer`, `--last-position`)
+//! overrides what is remembered for that run without replacing it. `--profile` says *which*
+//! remembered settings, which is what makes a second copy safe to start — see
+//! [`state_directory`].
 //!
 //! Four layers, and the boundaries between them are the point:
 //!
@@ -29,10 +36,20 @@
 //! frames, so the code that has to run while the widget is invisible cannot live in
 //! the paint loop at all. See [`resident`].
 
-// A `windows` subsystem binary: without this the widget opens a console behind
-// itself. Debug keeps the console, because that is where panics and the backend's
-// diagnostics go.
-#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+// A `windows` subsystem binary in every profile: no console, ever. This used to be
+// `not(debug_assertions)`, on the reasoning that a debug build wants somewhere for panics and
+// the backend's diagnostics to go — and the price was a black console window opening behind the
+// panel on every debug launch, which is the one thing a resident widget must not do. Anyone
+// debugging is running under a debugger or reading a panic through `cargo run`, and
+// `system::attach_parent_console` keeps that working: it borrows the console of whatever
+// launched this, so `--help` and a usage error still reach a shell without one ever being
+// created for a launch from Explorer or the Startup folder.
+//
+// `not(test)` and not an unconditional attribute, because the test harness is this same crate
+// root: a `windows` subsystem test binary has no standard handles, and std reports "no stdio
+// handle" as a *successful* write of every byte — so `cargo test` would print nothing at all
+// and still exit 0. The one thing worse than a silent program is a silent test run.
+#![cfg_attr(not(test), windows_subsystem = "windows")]
 
 // Said out loud rather than left to be discovered as a link error. There is no
 // cross-platform volume mixer hiding behind an abstraction here: the backend *is*
@@ -48,14 +65,57 @@ mod hotkey;
 mod icons;
 mod mark;
 mod resident;
+mod settings;
 mod system;
 mod widgets;
 
 /// What the program is called, in one place.
 ///
 /// Used for the window title, the notification area's tooltip, and the folder the
-/// favourites live in — so a rename is a rename rather than a hunt.
+/// favourites and the settings live in — so a rename is a rename rather than a hunt.
 pub const NAME: &str = "Azur Audio Switcher";
+
+/// Where the two things this program remembers between runs are kept.
+///
+/// `%APPDATA%\Azur Audio Switcher`, built from [`NAME`] so that the folder follows a
+/// rename rather than being spelled out again in [`favourites`] and in [`settings`].
+///
+/// `profile` is `--profile`, and it is what makes a second copy of the widget safe to run:
+/// `Some("test")` moves both files to `%APPDATA%\Azur Audio Switcher\profiles\test`, so
+/// starting one to try something out cannot write over the settings and the favourites of the
+/// one you actually use. Nested under the default folder rather than beside it, because `None`
+/// then resolves to exactly the path it always has — a flag whose whole purpose is to leave
+/// your settings alone must not move them in order to introduce itself.
+///
+/// `None` for `%APPDATA%` itself when the process has none — a service account, or a stripped
+/// environment. Both callers treat that as "this run remembers nothing", because a widget that
+/// will not start over a missing folder is worse than one that forgets.
+fn state_directory(profile: Option<&str>) -> Option<std::path::PathBuf> {
+    let directory = std::path::PathBuf::from(std::env::var_os("APPDATA")?).join(NAME);
+    Some(match profile {
+        Some(profile) => directory.join("profiles").join(profile),
+        None => directory,
+    })
+}
+
+/// Whether `name` is something [`state_directory`] can make a folder out of.
+///
+/// It goes straight into a path, so this is the check that it cannot walk out of `%APPDATA%`:
+/// `--profile ..\..\Startup` is a usage error here rather than a directory somewhere it has no
+/// business being. ASCII letters, digits, `-` and `_` — enough for `claude`, `test` or
+/// `work-headset`, and nothing that means anything to a filesystem.
+///
+/// A whitelist rather than a hunt for `..` and separators, because the hunt is the version of
+/// this that gets it wrong: `.` alone, a trailing space, a reserved device name like `con`, and
+/// an alternate data stream after a colon are all things a path can be that a blacklist has to
+/// remember and this cannot express.
+fn valid_profile(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 64
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
+}
 
 /// The panel's size at first launch, in logical pixels.
 ///
@@ -97,20 +157,30 @@ const WINDOW_ICON: u32 = 64;
 
 /// What the command line asked for.
 ///
-/// The first two are the starting positions of the panel's own two chrome toggles, and
-/// they are independent — which is the point of there being two. Neither is remembered
-/// between runs, the same as every other piece of window state here.
+/// The first two are the panel's own two chrome toggles, and they are `Option`s because
+/// **not being given is different from being given `false`**: those two are remembered
+/// between runs, so what a flag does is override what [`settings`] read for this run only,
+/// without replacing it. `None` means "whatever was remembered", and the resolution is two
+/// `unwrap_or`s in [`main`] — one place, where both halves are in view. The window's size and
+/// position are still not remembered at all.
 struct Options {
-    /// On top, and stays up until it is dismissed rather than hiding on focus loss.
-    stay_open: bool,
-    /// Where a summon puts the panel.
-    placement: resident::Placement,
+    /// `--no-stay-open`: on top and up until dismissed, rather than hiding on focus loss.
+    stay_open: Option<bool>,
+    /// `--at-pointer` / `--last-position`: where a summon puts the panel.
+    placement: Option<resident::Placement>,
     /// `--show`: open the panel at startup instead of waiting to be summoned.
     show: bool,
     hotkey: hotkey::Hotkey,
+    /// `--profile`: which set of remembered settings this run uses. `None` is the ordinary
+    /// one — see [`state_directory`].
+    profile: Option<String>,
 }
 
 fn main() -> eframe::Result {
+    // First, before anything can want to print: this binary has no console of its own in any
+    // profile, and this is what lends it the one it was launched from, if it was.
+    system::attach_parent_console();
+
     let options = match parse_arguments() {
         Ok(options) => options,
         Err(message) => {
@@ -123,9 +193,21 @@ fn main() -> eframe::Result {
 
     warn_about_glow();
 
+    // After the command line, because `--profile` names the folder these come out of, and
+    // before the window, because the panel starts as what they say.
+    let profile = options.profile.as_deref();
+    let settings = settings::Settings::load(profile);
+    let favourites = favourites::Favourites::load(profile);
+
+    // The two chrome toggles, resolved: what was remembered, unless this run said otherwise.
+    // The whole of the "a flag overrides without replacing" rule is these two lines — the file
+    // is not written here, and `App` is what writes it when the user clicks a toggle.
+    let stay_open = options.stay_open.unwrap_or(settings.stay_open());
+    let placement = options.placement.unwrap_or(settings.placement());
+
     // Before the window, because the panel's constructor hands its handle straight
     // to this and the thread is what shows it.
-    let mut resident = resident::Resident::spawn(options.hotkey.clone(), options.placement);
+    let mut resident = resident::Resident::spawn(options.hotkey.clone(), placement);
     let handle = resident.handle();
 
     let (side, icon) = mark::bitmap(WINDOW_ICON);
@@ -157,7 +239,7 @@ fn main() -> eframe::Result {
         // itself invisible. See [`PARKED`].
         .with_visible(false)
         .with_position(PARKED);
-    if options.stay_open {
+    if stay_open {
         // On top: a volume panel you have to go looking for behind the window you are
         // trying to turn down is not a widget. Travels with *stay open* rather than
         // being a third setting, because a panel that survives a click elsewhere and
@@ -193,8 +275,10 @@ fn main() -> eframe::Result {
         Box::new(move |cc| {
             Ok(Box::new(app::App::new(
                 cc,
-                options.stay_open,
-                options.placement,
+                stay_open,
+                placement,
+                settings,
+                favourites,
                 handle,
                 options.show,
             )))
@@ -235,23 +319,46 @@ fn glow_notice(set: bool) -> Option<&'static str> {
 
 /// Read the command line.
 ///
-/// Hand-rolled rather than a parser crate: four flags, one of which takes a value,
-/// and the error messages that matter are [`hotkey::Hotkey::parse`]'s.
+/// Hand-rolled rather than a parser crate: six flags, two of which take a value, and the
+/// error messages that matter are [`hotkey::Hotkey::parse`]'s.
+///
+/// Reads nothing off disk and takes no defaults from [`settings`], which is why it can run
+/// before the settings are loaded — and it has to, because `--profile` is what says *which*
+/// settings those are. What it reports is what was asked for and nothing else: the two
+/// remembered toggles come back as `None` when their flag was absent, and [`main`] is where
+/// that meets the file.
 fn parse_arguments() -> Result<Options, String> {
     let mut options = Options {
-        stay_open: true,
-        placement: resident::Placement::LastPosition,
+        stay_open: None,
+        placement: None,
         show: false,
         hotkey: hotkey::Hotkey::parse(hotkey::DEFAULT).expect("the default hotkey parses"),
+        profile: None,
     };
 
     let mut arguments = std::env::args().skip(1);
     while let Some(argument) = arguments.next() {
         match argument.as_str() {
-            "--no-stay-open" => options.stay_open = false,
-            "--at-pointer" => options.placement = resident::Placement::AtPointer,
-            "--last-position" => options.placement = resident::Placement::LastPosition,
+            "--no-stay-open" => options.stay_open = Some(false),
+            "--at-pointer" => options.placement = Some(resident::Placement::AtPointer),
+            "--last-position" => options.placement = Some(resident::Placement::LastPosition),
             "--show" => options.show = true,
+            "--profile" => {
+                let name = arguments
+                    .next()
+                    .ok_or_else(|| "--profile needs a name, like --profile test".to_owned())?;
+                if !valid_profile(&name) {
+                    // Named rather than sanitised. Quietly turning `../evil` into `evil`
+                    // would put the files somewhere the caller did not ask for and could
+                    // not predict, and this is a flag whose whole job is being predictable
+                    // about where it writes.
+                    return Err(format!(
+                        "--profile {name:?} cannot be a folder name: letters, digits, \
+                         - and _ only, up to 64 of them"
+                    ));
+                }
+                options.profile = Some(name);
+            }
             "--hotkey" => {
                 let spec = arguments.next().ok_or_else(|| {
                     "--hotkey needs a keystroke, like --hotkey win+alt+v".to_owned()
@@ -268,14 +375,26 @@ fn parse_arguments() -> Result<Options, String> {
                      \u{20}   --show            open the panel at startup\n\
                      \u{20}   --no-stay-open    hide it when it loses the focus\n\
                      \u{20}   --at-pointer      open it under the mouse\n\
-                     \u{20}   --last-position   open it where you left it (the default),\n\
-                     \u{20}                     on whichever screen the mouse is on\n\
+                     \u{20}   --last-position   open it where you left it, on whichever\n\
+                     \u{20}                     screen the mouse is on\n\
                      \u{20}   --hotkey <keys>   what summons it (default {default})\n\
+                     \u{20}   --profile <name>  keep this run's settings and favourites\n\
+                     \u{20}                     apart from the ones you use\n\
                      \n\
                      The icon in the notification area opens it, and its menu quits.\n\
                      Once open: Esc or the ✕ puts it away, and the two toggles in the\n\
-                     header are the same settings as the flags above.",
-                    default = hotkey::DEFAULT
+                     header are the same settings as the flags above.\n\
+                     \n\
+                     Those two toggles are remembered in\n\
+                     %APPDATA%\\{name}\\settings.txt, so the three flags that set them\n\
+                     are overrides for one run: they change what the panel starts as\n\
+                     and not what is written down. Clicking a toggle is what writes.\n\
+                     \n\
+                     --profile <name> moves that file and favourites.txt into\n\
+                     %APPDATA%\\{name}\\profiles\\<name>, which is how you try\n\
+                     something out without writing over what you have.",
+                    default = hotkey::DEFAULT,
+                    name = NAME
                 );
                 std::process::exit(0);
             }
@@ -287,6 +406,40 @@ fn parse_arguments() -> Result<Options, String> {
 
 #[cfg(test)]
 mod tests {
+    /// A profile name cannot reach outside `%APPDATA%`.
+    ///
+    /// The whole of why [`super::valid_profile`] exists: the name is joined onto a path, so
+    /// every shape that means something to a filesystem has to be a usage error rather than a
+    /// directory. Traversal is the one that matters, and the rest are here because a name that
+    /// *looks* accepted and then resolves somewhere else is the same fault wearing a different
+    /// hat — `con` and a trailing dot are both legal-looking and neither is a folder Windows
+    /// will give you.
+    #[test]
+    fn a_profile_name_cannot_escape_the_folder_it_names() {
+        for name in [
+            "", "..", ".", "../evil", "..\\evil", "a/b", "a\\b", "a:b", "a b", "a.", "a*", "é",
+        ] {
+            assert!(
+                !super::valid_profile(name),
+                "{name:?} should not be usable as a folder name"
+            );
+        }
+        // 65 characters: one past the cap, which exists so a name cannot be the reason a path
+        // runs into `MAX_PATH`.
+        assert!(!super::valid_profile(&"a".repeat(65)));
+
+        for name in [
+            "claude",
+            "test",
+            "work-headset",
+            "profile_2",
+            "A1",
+            &"a".repeat(64),
+        ] {
+            assert!(super::valid_profile(name), "{name:?} should be usable");
+        }
+    }
+
     /// A retired override name is diagnosed, not silently ignored.
     ///
     /// The half of this that cannot regress is already enforced by the compiler —

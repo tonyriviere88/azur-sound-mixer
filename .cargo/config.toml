@@ -13,5 +13,35 @@
 # decides that, and defaults to release. It is here so that compiling the helper needs only the
 # dependencies the release build is about to want anyway, rather than a second debug copy of
 # eframe and wgpu on a fresh clone.
+
+# `cargo claude-*` — the same commands, built somewhere else.
+#
+# An assistant working in this repository shares one `target/` with whoever is sitting at it,
+# and sharing `target/debug` is what makes the two of them slow: cargo keys its fingerprints
+# on the profile, so an agent's `cargo test` and an editor's rust-analyzer take turns
+# invalidating each other's artifacts and every build is a rebuild. On Windows they also take
+# turns *locking* them — "did not finalize incremental compilation session directory: Accès
+# refusé" is that collision, and the work of that compilation is thrown away.
+#
+# So the agent gets its own profile, which gets its own directory. `[profile.claude]` in
+# `Cargo.toml` inherits `dev` and changes nothing else, so what these build is the same code
+# the developer's `cargo build` builds — in `target/claude` instead of `target/debug`.
+#
+#   cargo claude-build            target/claude, leaving target/debug alone
+#   cargo claude-test             the same, for the test binaries
+#   cargo claude-clippy           `-D warnings` is deliberate; see below
+#   cargo claude-doc              checks the intra-doc links this codebase leans on
+#   cargo claude-run -- --show    and pass `--profile claude` to keep the settings apart
+#
+# `claude-clippy` denies warnings rather than printing them because an agent reading its own
+# output cannot be relied upon to notice a warning it did not cause; a non-zero exit it cannot
+# miss. `claude-run` is deliberately *not* given `--profile claude` here — that flag is the
+# program's, not cargo's, and hiding it in an alias is how you end up writing a settings file
+# you did not mean to. Pass it.
 [alias]
 deploy = "run --quiet --release --example deploy --"
+claude-build = "build --profile claude"
+claude-run = "run --profile claude"
+claude-test = "test --profile claude"
+claude-clippy = "clippy --profile claude --all-targets -- -D warnings"
+claude-doc = "doc --profile claude --no-deps"

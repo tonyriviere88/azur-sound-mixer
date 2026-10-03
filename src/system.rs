@@ -1,4 +1,8 @@
-//! The two places this widget has to talk to the operating system directly.
+//! The places this widget has to talk to the operating system directly.
+//!
+//! Two of them are about the window — the outline DWM draws around it, and keeping it out of
+//! the Alt-Tab switcher — one opens the sound page, and one borrows a console this binary is
+//! built never to create.
 
 use std::mem::size_of_val;
 
@@ -8,6 +12,7 @@ use windows::Win32::Foundation::HWND;
 use windows::Win32::Graphics::Dwm::{
     DwmSetWindowAttribute, DWMWA_BORDER_COLOR, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND,
 };
+use windows::Win32::System::Console::{AttachConsole, ATTACH_PARENT_PROCESS};
 use windows::Win32::UI::Shell::ShellExecuteW;
 use windows::Win32::UI::WindowsAndMessaging::{
     GetWindowLongPtrW, SetWindowLongPtrW, GWL_EXSTYLE, SW_SHOWNORMAL, WS_EX_APPWINDOW,
@@ -128,6 +133,34 @@ pub fn keep_out_of_alt_tab(window: &impl HasWindowHandle) {
         }
         SetWindowLongPtrW(hwnd, GWL_EXSTYLE, (current & !app) | tool);
     }
+}
+
+/// Borrow the console of whatever launched this, if there is one.
+///
+/// This binary is a `windows` subsystem binary in every profile — see [`crate`] — so it never
+/// *creates* a console, which is the point: a resident widget that flashes a black window open
+/// on every launch is a resident widget somebody uninstalls. What that costs is the standard
+/// handles. A `windows` subsystem process starts with none, so `--help`, a mistyped
+/// `--hotkey`'s error and [`crate::warn_about_glow`] all write into nothing — Rust's own
+/// `write` for stdout treats "no stdio handle" as a successful write of every byte, so they
+/// fail *silently*, which is the worst of the available failures.
+///
+/// `ATTACH_PARENT_PROCESS` is the whole of the fix. If the parent has a console — a shell, or
+/// `cargo run` — this process joins it, and `println!` reaches it because std asks
+/// `GetStdHandle` on every write rather than caching a handle at startup. If the parent has
+/// none — a shortcut, Explorer, the Startup folder — the call fails and creates nothing, which
+/// is exactly what a GUI launch wants. Either way there is nothing to undo on the way out:
+/// the console belongs to the shell and outlives us.
+///
+/// What it cannot fix is the ordering. A `windows` subsystem process does not hold the shell
+/// that started it, so the prompt comes back first and this program's output lands underneath
+/// it. That is a cosmetic oddity of every GUI program that prints, and the alternative — a
+/// console of our own — is the thing being avoided.
+pub fn attach_parent_console() {
+    // Failing is the ordinary case, not the exception: launched from anywhere that is not a
+    // console there is no parent console to attach to, and that is a program started the way
+    // this one usually is.
+    let _ = unsafe { AttachConsole(ATTACH_PARENT_PROCESS) };
 }
 
 /// Open the Windows sound page.

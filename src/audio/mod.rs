@@ -37,6 +37,29 @@ pub enum Flow {
     Input,
 }
 
+/// Which job a default endpoint is the default *for*.
+///
+/// Windows keeps three roles per flow — `eConsole`, `eMultimedia` and
+/// `eCommunications` — and this keeps two, because only one of those boundaries is a
+/// boundary anyone can hear. Nothing in the shipping Windows UI separates console from
+/// multimedia; the sound page moves them together and so does this. Communications is
+/// the one that is genuinely a different device on a real machine: the headset you take
+/// calls on while music stays on the speakers.
+///
+/// So [`Role::Default`] is "where sound goes" and [`Role::Communications`] is "where a
+/// call goes". The two are **disjoint**: neither writes the other's role, which is what
+/// makes the panel's two device sections independent of each other rather than one being
+/// an override the other can undo. The mapping onto Windows' three lives in one place,
+/// `backend::Backend::set_default`.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub enum Role {
+    /// Console and multimedia together: every ordinary sound on the machine.
+    Default,
+    /// Communications — what a voice call opens, and what the Windows sound page
+    /// calls the *default communication device*.
+    Communications,
+}
+
 /// One endpoint device the user could pick as their default.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Device {
@@ -107,6 +130,16 @@ pub struct Snapshot {
     /// Index into `outputs` / `inputs` of the current default, if there is one.
     pub default_output: Option<usize>,
     pub default_input: Option<usize>,
+    /// The same two indices, into the same two lists, for [`Role::Communications`].
+    ///
+    /// Separate fields rather than a map keyed by [`Role`]: there are two roles and
+    /// they are not interchangeable — everything else in this snapshot belongs to the
+    /// [`Role::Default`] endpoints, because they are the ones the sliders, the meters
+    /// and the session list hang off. These two are the only thing this widget knows
+    /// about the communications endpoints, and knowing which device it is is the whole
+    /// of what the panel needs.
+    pub communications_output: Option<usize>,
+    pub communications_input: Option<usize>,
     pub output: Endpoint,
     pub input: Endpoint,
     /// Sessions on the default output device, in a deterministic base order —
@@ -129,15 +162,20 @@ pub struct Snapshot {
 pub enum Command {
     SetEndpointVolume(Flow, f32),
     SetEndpointMute(Flow, bool),
-    /// Make this device the default, for all three roles — which is what the
-    /// Windows sound page does when you pick a device there.
+    /// Make this device the default for one [`Role`].
+    ///
+    /// One role's endpoints and no other's: [`Role::Default`] writes `eConsole` and
+    /// `eMultimedia`, [`Role::Communications`] writes `eCommunications`. The Windows
+    /// sound page moves all three at once when you pick a device on it; this panel has a
+    /// control per role instead, so a device chosen for calls is not quietly replaced the
+    /// next time the one for sound changes.
     ///
     /// No [`Flow`]: a device id already belongs to one, and the backend answers
-    /// "which endpoint moved" by re-reading both defaults rather than by being
+    /// "which endpoint moved" by re-reading the defaults rather than by being
     /// told. This is the one command that invalidates its caches — everything
     /// downstream of a default endpoint, its volume interface, its meter and every
     /// session on it, belongs to the device that just stopped being the default.
-    SetDefaultDevice(String),
+    SetDefaultDevice(Role, String),
     SetSessionVolume(String, f32),
     SetSessionMute(String, bool),
 }
@@ -324,6 +362,13 @@ fn run(
                     // The default endpoint moved, so the session list, both
                     // volume interfaces and the device lists all belong to the
                     // old device. Re-read everything on the next turn.
+                    //
+                    // Both roles, though only [`Role::Default`] can have invalidated
+                    // anything: nothing hangs off the communications endpoints, so for
+                    // those this is not an invalidation but a confirmation — it is what
+                    // gets the picker its answer on the next turn instead of up to
+                    // `RESCAN_DEVICES` later. Telling the two apart would buy one
+                    // skipped enumeration on a control nobody touches twice a minute.
                     next_rescan = Instant::now();
                     next_device_rescan = Instant::now();
                 }

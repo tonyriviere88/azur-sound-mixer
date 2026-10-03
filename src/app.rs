@@ -1,16 +1,17 @@
-//! The widget itself: one panel, four sections, top to bottom.
+//! The widget itself: one panel, five sections, top to bottom.
 //!
 //! ```text
 //! ┌──────────────────────────────────────┐
-//! │ 🎚 Audio                      📌 🖱 ✕ │  drag, stay open, where it opens, hide
-//! ├──────────────────────────────────────┤
+//! │ 🎚 Audio                    ⧉ 🖱 📌 ✕ │  drag; then sound settings, where it
+//! ├──────────────────────────────────────┤  opens, stay open, hide
 //! │ 🔊  42 ──────●────────────────        │  master output; the glyph mutes
 //! │ 🎤 100 ─────────────────────●         │  master input;  the glyph mutes
 //! │ ──────────────────────────────────── │
 //! │ Default devices                      │
 //! │ [ Speakers (Realtek(R) Audio)    ˅ ] │
 //! │ [ Microphone Array               ˅ ] │
-//! │ Manage all devices                ⧉  │
+//! │ ──────────────────────────────────── │
+//! │ Communications                    ˅  │  where calls go; shut by default
 //! │ ──────────────────────────────────── │
 //! │ Volume mixer                         │
 //! │ ▣ System sounds              🔊  ☆   │  one block per session,
@@ -35,6 +36,10 @@
 //! hundred milliseconds after a write during which the backend has not read the
 //! new value back yet. That last one is [`Echo`], and it is what keeps a dragged
 //! slider from stuttering against a 20Hz poll.
+//!
+//! The first two outlive the process — [`crate::favourites`] and [`crate::settings`],
+//! one file each under `%APPDATA%` — because both of them are the user telling the
+//! widget how they want it, and asking twice is asking too often.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -52,10 +57,11 @@ use egui::{
     ViewportCommand,
 };
 
-use crate::audio::{AudioController, Command, Endpoint, Flow, IconImage, Session, Snapshot};
+use crate::audio::{AudioController, Command, Endpoint, Flow, IconImage, Role, Session, Snapshot};
 use crate::favourites::Favourites;
 use crate::icons;
 use crate::resident;
+use crate::settings::Settings;
 use crate::system;
 use crate::widgets;
 
@@ -119,6 +125,11 @@ pub struct App {
     /// the first: staying open is about *when* it goes away, this is about *where* it
     /// comes back.
     placement: resident::Placement,
+    /// The same two values as they are on disk, which is not necessarily as they are
+    /// above: a command-line flag overrides one for this run without replacing what is
+    /// remembered. Written when the user clicks a toggle, and only then — see
+    /// [`crate::settings`].
+    settings: Settings,
 
     /// Uploaded application icons, keyed by the address of the `Arc` the backend
     /// shares — which is stable for as long as any snapshot still refers to the
@@ -136,12 +147,27 @@ pub struct App {
     /// rather than every frame it stays open.
     output_pick: Option<usize>,
     input_pick: Option<usize>,
+    /// The same, for the communications section's two. Four in all, because a `Select`
+    /// writes its pick into a place its caller owns and there are four of them — and
+    /// because a communications pick and a default pick are different answers to the
+    /// same list, so one field could not hold both.
+    communications_output_pick: Option<usize>,
+    communications_input_pick: Option<usize>,
     /// Whether the window has held the input focus since it was last shown. See
     /// [`App::hide_on_blur`].
     focus_seen: bool,
     /// The value of [`resident::Handle::shows`] this frame's focus tracking belongs
     /// to. A different one means the panel has been summoned again since.
     shows_seen: u64,
+    /// Whether the communications section is showing its two pickers.
+    ///
+    /// Shut on every launch, and the section exists at all because that is affordable:
+    /// where calls go is a thing somebody sets when they get a headset and then leaves
+    /// alone for months, so it earns a row and not the 80px two more selects would take
+    /// out of the mixer list. Not in [`crate::settings`] with the chrome toggles — those
+    /// are how the panel behaves, this is which part of it is being looked at, and a
+    /// disclosure that remembers being opened once is a section that is never shut again.
+    communications_open: bool,
 }
 
 impl App {
@@ -150,10 +176,20 @@ impl App {
     /// `start_visible` is the `--show` flag: without it the widget comes up hidden,
     /// which is what a resident program does, and the tray icon is the only sign it
     /// is running until the hotkey is pressed.
+    ///
+    /// `stay_open` and `placement` are what this run starts as, `settings` is what the
+    /// last run left on disk, and they are two arguments rather than one because a flag
+    /// can have put them out of step — see [`crate::settings`].
+    ///
+    /// Both files arrive already loaded rather than being read here, because which folder
+    /// they came out of is `--profile`'s answer and that is the command line's business. The
+    /// panel's business is the values.
     pub fn new(
         cc: &eframe::CreationContext<'_>,
         stay_open: bool,
         placement: resident::Placement,
+        settings: Settings,
+        favourites: Favourites,
         resident: resident::Handle,
         start_visible: bool,
     ) -> Self {
@@ -190,18 +226,22 @@ impl App {
         let app = Self {
             theme,
             audio: AudioController::spawn(ctx.clone(), resident.wake()),
-            favourites: Favourites::load(),
+            favourites,
             resident,
             stay_open,
             placement,
+            settings,
             textures: HashMap::new(),
             mark: None,
             peaks: HashMap::new(),
             echo: Echo::default(),
             output_pick: None,
             input_pick: None,
+            communications_output_pick: None,
+            communications_input_pick: None,
             focus_seen: false,
             shows_seen: 0,
+            communications_open: false,
         };
         if start_visible {
             // Through the resident thread rather than by starting the window
@@ -319,6 +359,10 @@ impl eframe::App for App {
                     ui.add(Divider::horizontal());
                     ui.add_space(space::S3);
                     self.devices(ui, &snapshot);
+                    ui.add_space(space::S3);
+                    ui.add(Divider::horizontal());
+                    ui.add_space(space::S3);
+                    self.communications(ui, &snapshot);
                     ui.add_space(space::S3);
                     ui.add(Divider::horizontal());
                     ui.add_space(space::S3);
@@ -613,6 +657,9 @@ impl App {
                             .clicked()
                         {
                             self.stay_open = !self.stay_open;
+                            // A click is the user saying which way they want it, so it
+                            // is the one thing that writes the preference down.
+                            self.settings.remember_stay_open(self.stay_open);
                             // On top travels with it: a panel that stays open behind
                             // the window you are turning down has not stayed open in
                             // any sense the user meant.
@@ -653,8 +700,32 @@ impl App {
                                 }
                             };
                             // The resident thread is what moves the window, so it is
-                            // the one that has to be told.
+                            // the one that has to be told; the file, so the next launch
+                            // opens where this one was asked to.
                             self.resident.set_placement(self.placement);
+                            self.settings.remember_placement(self.placement);
+                        }
+                        // Leftmost of the four, and the only one that is not about this
+                        // window: everything past picking a device — sample rates,
+                        // spatial audio, exclusive mode — is the long tail, and the page
+                        // that already has it is a better place for it than a 340px
+                        // panel. It sits in the chrome rather than in the devices section
+                        // because a row that leaves the widget was the one row in that
+                        // column not doing what the rows around it do, and because those
+                        // 24px belong to the mixer list. The glyph is what says it
+                        // leaves; the separation from the three window controls is the
+                        // space this layout already puts between the buttons and the
+                        // title.
+                        if ui
+                            .add(
+                                IconButton::new(&icons::external)
+                                    .variant(Variant::Subtle)
+                                    .size(Size::Small)
+                                    .tooltip("Windows Audio Settings"),
+                            )
+                            .clicked()
+                        {
+                            system::open_sound_settings();
                         }
                         // Whatever is left over between the title and the buttons.
                         // Claimed with `hover` and made draggable below, the same as
@@ -744,7 +815,9 @@ impl App {
         // a whole sentence of text rather than a number or a glyph, and a device
         // name is the one string here worth reading rather than recognising, so they
         // get the size out of step with the rest deliberately.
-        self.output_pick = self.echo.device(Flow::Output, snapshot.default_output);
+        self.output_pick = self
+            .echo
+            .device(Flow::Output, Role::Default, snapshot.default_output);
         let response = ui.add_enabled(
             !snapshot.outputs.is_empty(),
             Select::new(&mut self.output_pick)
@@ -755,15 +828,18 @@ impl App {
         );
         if response.changed() {
             if let Some(device) = self.output_pick.and_then(|i| snapshot.outputs.get(i)) {
-                self.echo.set_device(Flow::Output, self.output_pick);
+                self.echo
+                    .set_device(Flow::Output, Role::Default, self.output_pick);
                 self.audio
-                    .send(Command::SetDefaultDevice(device.id.clone()));
+                    .send(Command::SetDefaultDevice(Role::Default, device.id.clone()));
             }
         }
 
         ui.add_space(space::S2);
 
-        self.input_pick = self.echo.device(Flow::Input, snapshot.default_input);
+        self.input_pick = self
+            .echo
+            .device(Flow::Input, Role::Default, snapshot.default_input);
         let response = ui.add_enabled(
             !snapshot.inputs.is_empty(),
             Select::new(&mut self.input_pick)
@@ -774,20 +850,104 @@ impl App {
         );
         if response.changed() {
             if let Some(device) = self.input_pick.and_then(|i| snapshot.inputs.get(i)) {
-                self.echo.set_device(Flow::Input, self.input_pick);
+                self.echo
+                    .set_device(Flow::Input, Role::Default, self.input_pick);
                 self.audio
-                    .send(Command::SetDefaultDevice(device.id.clone()));
+                    .send(Command::SetDefaultDevice(Role::Default, device.id.clone()));
+            }
+        }
+    }
+
+    /// Where calls go: the same two lists, for Windows' communications role.
+    ///
+    /// Shut by default and one row wide when it is, because this is the setting of
+    /// somebody who owns a headset and a pair of speakers and wants each used for what
+    /// it is good at — a real want, and not a frequent one. Open, it is the section
+    /// above again: the same devices, the same two glyphs, a different role.
+    ///
+    /// The caption is there because the one thing that matters here cannot be seen in the
+    /// controls: these two are **independent** of the two above them — see
+    /// [`Command::SetDefaultDevice`], where each role writes only its own endpoints. Two
+    /// pickers that look identical to two others, over the same device list, would
+    /// otherwise be read as a duplicate of them, and the reading that follows from that —
+    /// "the section above sets this as well" — is the one somebody would only find out was
+    /// wrong by wondering why their calls came out of the speakers.
+    fn communications(&mut self, ui: &mut Ui, snapshot: &Snapshot) {
+        if widgets::section_toggle(ui, "Communications", self.communications_open).clicked() {
+            self.communications_open = !self.communications_open;
+        }
+        if !self.communications_open {
+            return;
+        }
+
+        ui.add_space(space::S2);
+        ui.add(
+            Text::new("Where calls go. Set here only, not above.")
+                .variant(TextVariant::Caption)
+                .color(TextColor::Tertiary),
+        );
+        ui.add_space(space::S2);
+
+        self.communications_output_pick = self.echo.device(
+            Flow::Output,
+            Role::Communications,
+            snapshot.communications_output,
+        );
+        let response = ui.add_enabled(
+            !snapshot.outputs.is_empty(),
+            Select::new(&mut self.communications_output_pick)
+                .options(snapshot.outputs.iter().map(|d| d.name.clone()))
+                .icon(&icons::speaker)
+                .size(Size::Medium)
+                .placeholder("No output device"),
+        );
+        if response.changed() {
+            if let Some(device) = self
+                .communications_output_pick
+                .and_then(|i| snapshot.outputs.get(i))
+            {
+                self.echo.set_device(
+                    Flow::Output,
+                    Role::Communications,
+                    self.communications_output_pick,
+                );
+                self.audio.send(Command::SetDefaultDevice(
+                    Role::Communications,
+                    device.id.clone(),
+                ));
             }
         }
 
         ui.add_space(space::S2);
 
-        // Everything past picking a device — sample rates, spatial audio, exclusive
-        // mode — is the long tail, and the page that already has it is a better
-        // place for it than a 340px panel. The glyph at the end says so: this row
-        // leaves the widget, where every other row in the panel acts inside it.
-        if widgets::link_row(ui, "Manage all devices", &icons::external).clicked() {
-            system::open_sound_settings();
+        self.communications_input_pick = self.echo.device(
+            Flow::Input,
+            Role::Communications,
+            snapshot.communications_input,
+        );
+        let response = ui.add_enabled(
+            !snapshot.inputs.is_empty(),
+            Select::new(&mut self.communications_input_pick)
+                .options(snapshot.inputs.iter().map(|d| d.name.clone()))
+                .icon(&icons::microphone)
+                .size(Size::Medium)
+                .placeholder("No input device"),
+        );
+        if response.changed() {
+            if let Some(device) = self
+                .communications_input_pick
+                .and_then(|i| snapshot.inputs.get(i))
+            {
+                self.echo.set_device(
+                    Flow::Input,
+                    Role::Communications,
+                    self.communications_input_pick,
+                );
+                self.audio.send(Command::SetDefaultDevice(
+                    Role::Communications,
+                    device.id.clone(),
+                ));
+            }
         }
     }
 
@@ -1197,7 +1357,11 @@ impl App {
 struct Echo {
     volume: HashMap<String, (f32, Instant)>,
     muted: HashMap<String, (bool, Instant)>,
-    device: HashMap<Flow, (Option<usize>, Instant)>,
+    /// Keyed by both halves of what a device pick is: which end of the machine, and
+    /// which job. The four pickers write four independent values into the same two
+    /// lists, so a key of [`Flow`] alone would have the communications section echoing
+    /// its answer into the section above it.
+    device: HashMap<(Flow, Role), (Option<usize>, Instant)>,
 }
 
 impl Echo {
@@ -1235,19 +1399,19 @@ impl Echo {
             .insert(key.to_owned(), (value, Instant::now() + ECHO));
     }
 
-    fn device(&mut self, flow: Flow, reported: Option<usize>) -> Option<usize> {
-        let Some(&(value, until)) = self.device.get(&flow) else {
+    fn device(&mut self, flow: Flow, role: Role, reported: Option<usize>) -> Option<usize> {
+        let Some(&(value, until)) = self.device.get(&(flow, role)) else {
             return reported;
         };
         if Instant::now() >= until || value == reported {
-            self.device.remove(&flow);
+            self.device.remove(&(flow, role));
             return reported;
         }
         value
     }
 
-    fn set_device(&mut self, flow: Flow, value: Option<usize>) {
+    fn set_device(&mut self, flow: Flow, role: Role, value: Option<usize>) {
         self.device
-            .insert(flow, (value, Instant::now() + ECHO_DEVICE));
+            .insert((flow, role), (value, Instant::now() + ECHO_DEVICE));
     }
 }

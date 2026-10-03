@@ -81,6 +81,10 @@ windows = { version = "0.62", features = [
     "Win32_Media_Audio",
     "Win32_Media_Audio_Endpoints",
     "Win32_Storage_FileSystem",
+    # `AttachConsole`, for the output of `--help` and of a usage error. This binary is a
+    # `windows` subsystem binary in every profile, so it has no standard handles of its own
+    # and borrows the shell's — see `system::attach_parent_console`.
+    "Win32_System_Console",
     "Win32_System_Com",
     "Win32_System_Com_StructuredStorage",
     "Win32_System_Threading",
@@ -91,6 +95,18 @@ windows = { version = "0.62", features = [
     "Win32_UI_Shell_PropertiesSystem",
     "Win32_UI_WindowsAndMessaging",
 ] }
+
+# The profile behind `cargo claude-*` — see the aliases in `.cargo/config.toml`.
+#
+# `dev` and nothing else, on purpose: what an assistant builds has to be what the developer
+# builds, or a green agent run says nothing about the repository. All this buys is the
+# *directory* — cargo puts a custom profile's artifacts in `target/<name>`, so two builders
+# stop invalidating and locking one shared `target/debug`.
+#
+# Not `strip`ped, not `opt-level`ed, no `debug = 0`: every one of those would be a second set
+# of compiler flags to hold in mind when a test passes here and fails there.
+[profile.claude]
+inherits = "dev"
 
 [profile.release]
 # A tray-resident widget; size and startup matter more than the last few percent

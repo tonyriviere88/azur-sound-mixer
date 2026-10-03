@@ -233,25 +233,33 @@ pub fn app_icon(
 }
 
 // ---------------------------------------------------------------------------
-// link_row
+// section_toggle
 // ---------------------------------------------------------------------------
 
-/// A row that opens something else: label, and one glyph at the end saying where.
+/// A section heading that opens and closes: the label, and a chevron at the end
+/// saying which way it will go.
 ///
-/// The glyph is trailing and there is nothing leading, so `trailing` carries the
-/// whole message — which is why it replaced the chevron rather than joining it. A
-/// chevron means "further in, still here"; this row leaves the widget, and one mark
-/// that says so beats two that disagree.
+/// Drawn to read as a *heading* rather than as a control, because the two sections
+/// either side of it are headings — `collection_label`'s body step in
+/// `text-secondary` — and a row that shouted would make the panel look like it had
+/// three different kinds of section in it. What says it can be clicked is the hover
+/// fill and the chevron, which is enough for a disclosure and no more than one.
 ///
-/// With no leading glyph the label starts flush at the row's left edge, which lines
-/// it up with the section headings above and below it rather than with the padded
-/// text inside the selects.
+/// The label is flush at the row's left edge so that it lines up with the headings
+/// above and below rather than with the padded text inside the selects, and the
+/// chevron is inset by the horizontal padding of a `Size::Medium` control, which
+/// puts it in the same column as those selects' own chevrons. The row is padded on
+/// one side only, deliberately: each edge answers to the thing it sits under.
 ///
-/// Azur's `MenuItem` draws this shape, and was what stood here — but its height is
-/// `line-body + space-3 × 2`, a fixed 36px, the one measurement in the panel that
-/// does not follow the control scale. At 24px beside 24px selects this is the same
-/// row, on the same rhythm.
-pub fn link_row(ui: &mut Ui, label: &str, trailing: Icon<'_>) -> Response {
+/// Azur has no accordion, and this is not one — an accordion owns its content and
+/// animates it. The caller keeps the `bool` and simply draws less, which is what a
+/// panel whose height is the user's to set wants: a collapsed section gives its
+/// space to the mixer list, and nothing has to be told.
+///
+/// The height is `control-small`, matching the selects it sits over. Azur's
+/// `MenuItem` is the other row of this shape and is a fixed 36px, which is the one
+/// measurement in this panel that does not follow the control scale.
+pub fn section_toggle(ui: &mut Ui, label: &str, open: bool) -> Response {
     let t = azur_egui_theme::components::theme(ui.ctx());
     let height = azur_egui_theme::tokens::control::SMALL;
     let (rect, response) =
@@ -262,26 +270,28 @@ pub fn link_row(ui: &mut Ui, label: &str, trailing: Icon<'_>) -> Response {
 
     let corner = CornerRadius::same(radius::SMALL);
     if response.hovered() {
-        // `hover_fill`, not `control_fills`: this row is a *place* — it goes to
-        // Settings — which is the distinction rule 1 of `desktop` is drawn around. Both
-        // are the same colour by design, and saying which one it is here is what keeps
-        // that a deliberate agreement rather than a coincidence.
+        // `hover_fill`, not `control_fills`: this row is a *place* in the panel rather
+        // than a control being operated, which is the distinction rule 1 of `desktop` is
+        // drawn around. Both are the same colour by design, and saying which one it is
+        // here keeps that a deliberate agreement rather than a coincidence.
         ui.painter()
             .rect_filled(rect, corner, azur_egui_theme::desktop::hover_fill(&t));
     }
-    // 14px, between the 12px Azur gives a trailing chevron and the 16px it gives a
-    // leading icon: this glyph has a box, an arrow and an arrowhead to fit, and 12
-    // is where they start to merge.
-    const GLYPH: f32 = 14.0;
-    // In from the row's right edge by the horizontal padding Azur gives a
-    // `Size::Medium` control, which puts this mark in the same column as the
-    // chevrons of the two selects above it instead of hard against the panel.
-    //
-    // The row is padded on one side only, and deliberately: the label is flush left
-    // to line up with the section headings, the glyph is inset to line up with the
-    // chevrons. Each edge answers to the thing it sits under.
+    // 12px: Azur's size for a chevron, which is the glyph this is. The 14 the external
+    // link mark needed was for a box, an arrow and an arrowhead in one square; two
+    // strokes need no such room, and a chevron drawn larger than Azur draws it would not
+    // match the ones inside the selects underneath.
+    const GLYPH: f32 = 12.0;
     const TRAILING: f32 = space::S4;
-    trailing(
+    // Down when it is shut, up when it is open — the direction the *content* will move,
+    // which is the way every disclosure on the desktop is drawn and the opposite of
+    // pointing at the state.
+    let chevron: Icon<'_> = if open {
+        &azur_egui_theme::icons::chevron_up
+    } else {
+        &azur_egui_theme::icons::chevron_down
+    };
+    chevron(
         ui.painter(),
         Rect::from_center_size(
             pos2(rect.right() - TRAILING - GLYPH * 0.5, rect.center().y),
@@ -297,11 +307,11 @@ pub fn link_row(ui: &mut Ui, label: &str, trailing: Icon<'_>) -> Response {
         ui,
         label,
         t.fonts.body.clone(),
-        t.text.primary,
+        t.text.secondary,
         text.width(),
     );
     // On the row's ink baseline, because the row holds a glyph: the label has to be
-    // level with the arrow at the far end of it.
+    // level with the chevron at the far end of it.
     galley_on_row(ui, rect, &t.fonts.body, text.left(), galley);
 
     if response.has_focus() {

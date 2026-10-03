@@ -26,15 +26,15 @@ use windows::Win32::Foundation::S_OK;
 use windows::Win32::Media::Audio::Endpoints::{IAudioEndpointVolume, IAudioMeterInformation};
 use windows::Win32::Media::Audio::{
     eCapture, eCommunications, eConsole, eMultimedia, eRender, AudioSessionStateActive,
-    AudioSessionStateExpired, EDataFlow, IAudioSessionControl2, IAudioSessionManager2, IMMDevice,
-    IMMDeviceEnumerator, ISimpleAudioVolume, MMDeviceEnumerator, DEVICE_STATE_ACTIVE,
+    AudioSessionStateExpired, EDataFlow, ERole, IAudioSessionControl2, IAudioSessionManager2,
+    IMMDevice, IMMDeviceEnumerator, ISimpleAudioVolume, MMDeviceEnumerator, DEVICE_STATE_ACTIVE,
 };
 use windows::Win32::System::Com::{CoCreateInstance, CLSCTX_ALL, STGM_READ};
 
 use super::policy::{IPolicyConfig, CPOLICY_CONFIG_CLIENT};
 use super::process::{self, IconImage};
 use super::wstr::{take_com_string, wide};
-use super::{Command, Device, Endpoint, Flow, Session, Snapshot};
+use super::{Command, Device, Endpoint, Flow, Role, Session, Snapshot};
 
 /// A default endpoint this backend currently holds interfaces for.
 ///
@@ -87,6 +87,15 @@ pub struct Backend {
     inputs: Vec<Device>,
     render: Option<Bound>,
     capture: Option<Bound>,
+    /// The communications defaults, as ids — read, never bound.
+    ///
+    /// No [`Bound`] for these, because there is nothing to bind: the volume, the meter
+    /// and the session list all belong to the [`Role::Default`] endpoints, which are the
+    /// ones this panel's sliders move. A communications endpoint is only ever *named*
+    /// here, so an id is the whole of what has to be kept, and a pair of pickers does not
+    /// cost two `Activate` calls per device rescan.
+    communications_render: Option<String>,
+    communications_capture: Option<String>,
 
     sessions: Vec<Live>,
     identities: HashMap<String, Identity>,
@@ -112,6 +121,8 @@ impl Backend {
             inputs: Vec::new(),
             render: None,
             capture: None,
+            communications_render: None,
+            communications_capture: None,
             sessions: Vec::new(),
             identities: HashMap::new(),
             error: None,
@@ -125,13 +136,19 @@ impl Backend {
     // Enumeration
     // -----------------------------------------------------------------------
 
-    /// Re-read both device lists and both defaults, rebinding whatever moved.
+    /// Re-read both device lists and every default, rebinding whatever moved.
     pub fn rescan_devices(&mut self) {
         self.outputs = self.list(eRender);
         self.inputs = self.list(eCapture);
 
-        let default_render = self.default_id(eRender);
-        let default_capture = self.default_id(eCapture);
+        let default_render = self.default_id(eRender, eConsole);
+        let default_capture = self.default_id(eCapture, eConsole);
+        // On the same clock as the two above, and involved in nothing else: these move
+        // when this panel moves them, when the sound page does, and when a headset is
+        // plugged in — which is the set of things a 1.5s re-read catches and an event
+        // nobody has subscribed to would not.
+        self.communications_render = self.default_id(eRender, eCommunications);
+        self.communications_capture = self.default_id(eCapture, eCommunications);
 
         if self.render.as_ref().map(|b| &b.id) != default_render.as_ref() {
             // Bind first, then swap: the sessions being dropped are the old
@@ -170,12 +187,15 @@ impl Backend {
         }
     }
 
-    fn default_id(&self, flow: EDataFlow) -> Option<String> {
+    /// The id of the current default for one flow and one of Windows' own roles.
+    ///
+    /// `ERole` rather than this crate's [`Role`], because the two are not the same shape:
+    /// [`Role::Default`] covers two of Windows' roles, and reading either one answers for
+    /// both where *writing* has to set both. That translation is
+    /// [`Backend::set_default`]'s job, and this stays at the width of the API it calls.
+    fn default_id(&self, flow: EDataFlow, role: ERole) -> Option<String> {
         unsafe {
-            let device = self
-                .enumerator
-                .GetDefaultAudioEndpoint(flow, eConsole)
-                .ok()?;
+            let device = self.enumerator.GetDefaultAudioEndpoint(flow, role).ok()?;
             device_id(&device)
         }
     }
@@ -364,13 +384,20 @@ impl Backend {
             })
             .collect();
 
-        let index_of = |devices: &[Device], bound: Option<&Bound>| {
-            let id = &bound?.id;
+        // By id, into a list rebuilt from an enumeration whose order is the audio
+        // service's: a device appearing or going away shifts every index after it, so an
+        // index is derived here every poll and never carried. A default that is not in
+        // the list at all — the enumeration is active devices only — comes back `None`,
+        // and the picker shows its placeholder rather than somebody else's device.
+        let index_of = |devices: &[Device], id: Option<&String>| {
+            let id = id?;
             devices.iter().position(|d| &d.id == id)
         };
         Snapshot {
-            default_output: index_of(&self.outputs, self.render.as_ref()),
-            default_input: index_of(&self.inputs, self.capture.as_ref()),
+            default_output: index_of(&self.outputs, self.render.as_ref().map(|b| &b.id)),
+            default_input: index_of(&self.inputs, self.capture.as_ref().map(|b| &b.id)),
+            communications_output: index_of(&self.outputs, self.communications_render.as_ref()),
+            communications_input: index_of(&self.inputs, self.communications_capture.as_ref()),
             outputs: self.outputs.clone(),
             inputs: self.inputs.clone(),
             output,
@@ -414,18 +441,25 @@ impl Backend {
                         let _ = live.volume.SetMute(*muted, std::ptr::null());
                     }
                 }
-                Command::SetDefaultDevice(id) => self.set_default(id),
+                Command::SetDefaultDevice(role, id) => self.set_default(*role, id),
             }
         }
     }
 
-    /// Make a device the default for every role.
+    /// Make a device the default for a [`Role`].
     ///
-    /// All three, because that is what picking a device on the Windows sound page
-    /// does: leaving `eCommunications` behind gives you a machine whose media
-    /// plays out of the new device while calls stay on the old one, which reads as
-    /// the switch not having worked.
-    fn set_default(&mut self, id: &str) {
+    /// Each role writes only its own: `eConsole` and `eMultimedia` for
+    /// [`Role::Default`], `eCommunications` for [`Role::Communications`], and neither
+    /// touches the other's. That is what makes the panel's two sections mean what they
+    /// say — a communications device somebody has chosen stays chosen, however often the
+    /// device above it changes, which it could not do if the section above wrote this
+    /// role too.
+    ///
+    /// The cost is the other half of the same coin, and it is worth being clear about:
+    /// picking a headset in *Default devices* alone will **not** move calls onto it.
+    /// Where the Windows sound page conflates the two, this panel has a control for each,
+    /// and the second one is the answer to "my calls are still on the speakers".
+    fn set_default(&mut self, role: Role, id: &str) {
         let policy = match &self.policy {
             Ok(policy) => policy.clone(),
             Err(hr) => {
@@ -437,7 +471,11 @@ impl Backend {
         };
         let key = wide(id);
         let device = PCWSTR(key.as_ptr());
-        for role in [eConsole, eMultimedia, eCommunications] {
+        let roles: &[ERole] = match role {
+            Role::Default => &[eConsole, eMultimedia],
+            Role::Communications => &[eCommunications],
+        };
+        for &role in roles {
             let hr = unsafe { policy.SetDefaultEndpoint(device, role) };
             if hr.is_err() {
                 self.error = Some(format!("Could not set the default device ({hr:?})."));

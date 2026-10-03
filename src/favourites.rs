@@ -6,7 +6,8 @@
 //! and the thing they expect to still be starred tomorrow.
 //!
 //! One line per name in a text file under `%APPDATA%`. No format, no dependency,
-//! and a file a person can read and edit.
+//! and a file a person can read and edit — the same bargain [`crate::settings`] makes
+//! for the panel's two toggles, in the same folder.
 
 use std::collections::BTreeSet;
 use std::path::PathBuf;
@@ -19,12 +20,11 @@ pub struct Favourites {
 }
 
 impl Favourites {
-    pub fn load() -> Self {
-        let file = std::env::var_os("APPDATA").map(|appdata| {
-            PathBuf::from(appdata)
-                .join("Azur Audio Switcher")
-                .join("favourites.txt")
-        });
+    /// `profile` is `--profile`: which folder under `%APPDATA%` this run reads and writes.
+    /// See [`crate::state_directory`].
+    pub fn load(profile: Option<&str>) -> Self {
+        let file =
+            crate::state_directory(profile).map(|directory| directory.join("favourites.txt"));
         let names = file
             .as_ref()
             .and_then(|path| std::fs::read_to_string(path).ok())

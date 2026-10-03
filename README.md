@@ -10,6 +10,7 @@ cargo run --release -- --show                  # and open it straight away
 cargo run --release -- --no-stay-open          # hides itself when it loses the focus
 cargo run --release -- --at-pointer            # opens under the mouse, not where you left it
 cargo run --release -- --hotkey ctrl+alt+f9    # some other keystroke
+cargo run --release -- --profile test          # settings and favourites of its own
 ```
 
 It is **resident**. Starting it puts an icon in the notification area and nothing on
@@ -30,7 +31,8 @@ equivalent elsewhere that a stub could stand in for.
 
 | | |
 | --- | --- |
-| **Default devices** | Pick the output and input device. Sets all three roles — console, multimedia *and* communications — which is what the Windows sound page does, and what stops your calls from staying on the old headset. |
+| **Default devices** | Pick the output and input device: the console and multimedia roles, which every ordinary sound on the machine uses. Calls have their own pair — the **Communications** section below — and this does not touch them. |
+| **Communications** | Windows keeps a *second* pair of defaults, for calls, and this is the control for it: its own section under the first, shut by default and one row wide when it is. Independent of the section above, so a headset chosen for calls stays chosen. |
 | **Master volume** | Output and input, on Core Audio's scalar curve — the same one the Windows volume slider moves along, so a number here matches the number there. |
 | **Mute** | Click any speaker or microphone glyph. One control, in eight places: the two endpoints and every application. Red when it is off. |
 | **Volume mixer** | Every application rendering to the default output, with its real name and its own icon, its own slider and its own mute. Ordered starred → making sound → the rest, alphabetical inside each group. |
@@ -40,6 +42,8 @@ equivalent elsewhere that a stub could stand in for.
 | **Summoning** | A global hotkey — `Win+Alt+V` by default, `--hotkey` for anything else — toggles the panel. So does clicking the tray icon. It always opens on the screen the pointer is on. |
 | **Stay open** | Header toggle. On: the panel sits above other windows and waits to be dismissed. Off: it hides the moment you click away. |
 | **Where it opens** | Header toggle. Either under the mouse, or where you left it — and "where you left it" is measured from the corner of a screen, so it comes back in the same corner of whichever screen the mouse is on. |
+| **Windows audio settings** | The ⧉ in the header, leftmost of its four buttons. Everything past picking a device — sample rates, spatial audio, exclusive mode — is the long tail, and the page that already has it is a better place for it than a 340px panel. |
+| **Remembered** | Both header toggles, in `%APPDATA%\Azur Audio Switcher\settings.txt` — two `key = value` lines beside the favourites, editable by hand. Set them once and they are how the widget starts tomorrow. `--profile <name>` gives a run its own copy of both files. |
 
 Follows the system rather than itself: press a keyboard volume key, or move a
 slider in Windows' own mixer, and this moves.
@@ -264,6 +268,32 @@ there:
   told apart from "provided, under an IID this build no longer answers", which is
   exactly the failure that happened — and the volume controls carry on working.
 
+### Two roles, out of Windows' three
+
+`SetDefaultEndpoint` takes one `ERole` and Windows keeps three of them — `eConsole`,
+`eMultimedia`, `eCommunications` — but only one of those boundaries is a boundary
+anyone can hear. Nothing in the shipping Windows UI separates console from multimedia;
+the sound page moves them together, and so does this. So `audio::Role` keeps two:
+
+| `Role` | writes | is |
+| --- | --- | --- |
+| `Default` | `eConsole` + `eMultimedia` | the *Default devices* section: where sound goes |
+| `Communications` | `eCommunications` | the *Communications* section: where a call goes |
+
+**The two are disjoint, and that is the design.** Neither writes the other's role, so
+each section means exactly what it says: a device chosen for calls stays chosen however
+often the device for sound changes, which it could not do if the section above wrote
+this role as well. Two controls that can silently undo one another are not two controls.
+
+The cost is the other side of the same coin and is worth saying plainly: **picking a
+headset in *Default devices* alone will not move your calls onto it.** The Windows sound
+page conflates the two and this does not, so a machine with a headset needs both set —
+and the *Communications* section is the answer to "why are my calls still on the
+speakers", which is why it is one click from being visible rather than somewhere else.
+
+Reading is the asymmetric half: `Role::Default` is read back off `eConsole` alone, since
+one role answers for both when the two are only ever written together.
+
 ## Naming and drawing an application
 
 A session knows a pid and, in principle, a display name it set for itself — which
@@ -296,7 +326,7 @@ What the layer changes here, rule by rule:
 
 | | | |
 | --- | --- | --- |
-| **1. one hover** | `background-control-hover` and `-card-hover` move three rungs up the neutral ramp, not one | Every fill in this panel already read the *token* — `glyph_button`, `link_row`, the selects, the caption buttons — so all of them moved together and no call site changed. Measured off the framebuffer under the pointer: **`#4d525c`**, which is the rung `desktop::hover_fill` names. |
+| **1. one hover** | `background-control-hover` and `-card-hover` move three rungs up the neutral ramp, not one | Every fill in this panel already read the *token* — `glyph_button`, `section_toggle`, the selects, the caption buttons — so all of them moved together and no call site changed. Measured off the framebuffer under the pointer: **`#4d525c`**, which is the rung `desktop::hover_fill` names. |
 | **2. a selected row** | the accent as a surface | Nothing here is selected: a mixer row is not a list item you pick, and a favourite is marked by a star rather than by a fill. Not adopted, and not an omission. |
 | **3. nothing structural is rounded** | `desktop::panel` — square, unringed, marginless | What this panel had reached by hand, now said in one call. It matters twice over here: the corner and the outline both belong to the compositor, so anything drawn at the edge is a second border. |
 | **4. rows are 24pt and they touch** | `row::DENSE` | Half adopted, deliberately — see [Density](#density). |
@@ -329,12 +359,18 @@ these along with everything Azur draws:
   the handle paints over the meter rather than the meter cutting across the handle.
 - **`app_icon`**, an uploaded texture or a fallback glyph, dimmed for an inactive
   session.
-- **`link_row`**, which replaced `MenuItem` for "Manage all devices". `MenuItem`
-  draws this shape, but its height is `line-body + space-3 × 2` — a fixed 36px, the
-  one measurement in the panel that does not follow the control scale. One glyph,
-  trailing, and nothing leading: with no leading icon the label starts flush at the
-  row's left edge, lining up with the section headings above and below it rather
-  than with the padded text inside the selects.
+- **`section_toggle`**, the *Communications* heading that opens and closes. Drawn to
+  read as a heading rather than as a control — `collection_label`'s body step in
+  `text-secondary`, the same as the two sections either side of it — because a row
+  that shouted would make the panel look like it had three kinds of section in it.
+  What says it can be clicked is the hover fill and the chevron. The label is flush
+  at the row's left edge, lining up with those headings rather than with the padded
+  text inside the selects; the chevron is inset by a `Size::Medium` control's
+  horizontal padding, which puts it in the same column as those selects' own
+  chevrons. Padded on one side only, deliberately: each edge answers to the thing it
+  sits under. Its height is `control-small`, where Azur's `MenuItem` — the other row
+  of this shape — is a fixed 36px, the one measurement in the panel that does not
+  follow the control scale.
 - **`resize_grip`**, the hatch in the corner.
 
 Azur's [`icons`](../azur-egui-theme/src/icons.rs) is deliberately only chrome —
@@ -343,14 +379,17 @@ Speakers and microphones are this application's domain, so
 [`icons`](src/icons.rs) paints them, to the same contract: fill the rect you are
 handed, in the colour you are handed. A muted speaker is a cone with a cross where
 the waves were and a muted microphone is a slash, because those are what the
-Windows taskbar draws and what still read at 14px. "Manage all devices" gets the
+Windows taskbar draws and what still read at 14px. Windows audio settings gets the
 box-with-an-arrow-leaving-it, open at the top-right corner — the gap is what stops
 the arrow reading as an arrow *inside* a window.
 
-That glyph sits where the row's chevron used to, rather than beside it: a chevron
-means "further in, still here", and this row is the one thing in the panel that acts
-somewhere other than here. Two marks that disagree about that are worse than one
-that does not.
+That glyph is in the **header** now, leftmost of the four buttons, where it used to
+be a labelled row at the foot of the devices section. Two reasons, and the second is
+the one that decided it: a row that leaves the widget was the only row in that column
+not doing what the rows around it do, and those 24px belong to the mixer list. A
+chevron would have been the wrong mark either way — a chevron means "further in,
+still here" — so the glyph is the whole message, which is what lets it drop its label
+and become an icon button beside the three that are about the window.
 
 ### One baseline per row
 
@@ -393,7 +432,7 @@ each pair of items and on **both** sides of every space, which is how an intende
 rhythm on screen.
 
 On top of that, Azur's `control-small` scale for the panel's own furniture: a 24px
-"Manage all devices" row, and a 36px mixer row — a 20px identity line and a
+*Communications* heading row, and a 36px mixer row — a 20px identity line and a
 `Size::Small` slider, two apart, with the meter *inside* the slider's own row rather
 than on a strip below it.
 
@@ -430,7 +469,7 @@ thing worth having:
 
 Undecorated and transparent, so there is no caption for the platform to move the window
 by. **Everything in the chrome row that is not a button drags it** — the mark, the app
-name, and the space between them and the toggles — at the row's full height, because a
+name, and the space between them and the buttons — at the row's full height, because a
 caption you can only grab in a band through the middle feels broken without ever looking
 it. `Esc` closes.
 
@@ -448,8 +487,32 @@ resizing it. Measured: at 2px and 5px in, the top edge resizes; at 10px, it drag
 | **stay open** 📌 | when does it go away? | `WindowLevel::AlwaysOnTop`, and it waits to be dismissed | `Normal`, and it hides as soon as it loses the focus |
 | **where it opens** 🖱 | where does it come back? | under the mouse | where you left it, on the mouse's screen |
 
-`--no-stay-open` and `--at-pointer` pick the starting positions; neither is remembered
-between runs, the same as every other piece of window state here.
+Four buttons in that row, not three: **⧉ Windows audio settings** sits leftmost, then
+these two, then ✕. It is the only one of the four that is not about this window, which
+is why it is at the far end of them — and it is a plain button rather than a toggle, so
+it has no state to draw and needs no `pressed`.
+
+**Both are remembered between runs**, in `%APPDATA%\Azur Audio Switcher\settings.txt`:
+
+```
+stay-open = off
+placement = at-pointer
+```
+
+They are settings rather than window state, which is the distinction that decides what
+gets written down here. They say how the panel should *behave* — whether it gets in the
+way, where it arrives — and somebody who turned *stay open* off because a panel over
+their work is the thing they disliked about it does not want to turn it off again
+tomorrow. The window's size and position are still not kept: those are where the panel
+happened to be sitting, and "where you left it" is already remembered for as long as it
+means anything, which is this session on this arrangement of monitors.
+
+`--no-stay-open`, `--at-pointer` and `--last-position` are then **overrides for one
+run**: they pick what the panel starts as and do not replace what is written down, so a
+flag typed into a shell to try something stays a try rather than becoming the preference.
+Clicking a toggle is what writes — which is also what brings the two back into step. See
+[`settings`](src/settings.rs), which holds the file's values while `app` holds the run's
+and says why that is two copies rather than one.
 
 These were **one** control — a pin — on the theory that a panel you want to keep is also
 a panel you have placed. That is true often enough to be tempting and not often enough
@@ -500,9 +563,9 @@ Four things make the auto-hide behave:
   `Escape` to close itself; checking for it first would put the whole panel away with a
   keystroke aimed at a dropdown.
 
-The one dismissal that looks accidental isn't: *Manage all devices* opens Settings,
-Settings takes the focus, and a panel that is not staying open hides behind it. That is what a row
-which leaves the widget should do.
+The one dismissal that looks accidental isn't: the header's ⧉ opens the Windows sound
+page, that page takes the focus, and a panel that is not staying open hides behind it.
+That is what a button which leaves the widget should do.
 
 **The outline belongs to the compositor.** The panel used to paint its own
 `radius-xlarge` corner and `stroke-default` edge, and that produced a double border,
@@ -691,6 +754,56 @@ let you overwrite the image of a running process. It will let you *rename* it, s
 moves the old binary aside, copies, and sweeps the leftover away next time. What it cannot do
 is change the panel already on screen: that is still the old build, and it keeps the hotkey
 until you quit it from the tray.
+
+### No console, in any profile
+
+`#![cfg_attr(not(test), windows_subsystem = "windows")]`. This used to be
+`not(debug_assertions)` — a debug build kept a console, on the reasoning that panics and the
+backend's diagnostics need somewhere to go — and what that cost was a black window opening
+behind the panel on every debug launch, which is the one thing a resident widget must not do.
+
+Two things make dropping it free. `system::attach_parent_console` calls
+`AttachConsole(ATTACH_PARENT_PROCESS)`, so a launch from a shell or from `cargo run` *borrows*
+that console and `--help`, a mistyped `--hotkey` and the `AZUR_GLOW` notice all still print —
+while a launch from Explorer, a shortcut or the Startup folder finds no parent console, creates
+nothing, and shows no window. And the guard is `not(test)` rather than nothing at all, because
+the test harness is this same crate root: a `windows` subsystem test binary has no standard
+handles, and std reports "no stdio handle" as a **successful** write of every byte, so
+`cargo test` would print nothing and still exit 0.
+
+### `cargo claude-*` and `--profile`, for an agent in the same checkout
+
+An assistant working in this repository shares it with whoever is sitting at it, and two
+things they would otherwise share are worth separating.
+
+```
+cargo claude-build            target/claude, not target/debug
+cargo claude-test             the same, for the test binaries
+cargo claude-clippy           -D warnings, so a warning cannot be scrolled past
+cargo claude-doc              the intra-doc links this codebase leans on
+cargo claude-run -- --show --profile claude
+```
+
+**`target/`**, because cargo keys its fingerprints on the profile: an agent's `cargo test` and
+an editor's rust-analyzer take turns invalidating one another's artifacts, and on Windows they
+take turns *locking* them — "did not finalize incremental compilation session directory: Accès
+refusé" is that collision, and the work of that compilation is thrown away.
+[`profile.claude`](Cargo.toml) inherits `dev` and changes nothing else, so what those aliases
+build is the same code `cargo build` builds; all it buys is the directory.
+
+**`%APPDATA%`**, because this program *writes* there. Launching it to check a change would
+otherwise read and overwrite the settings and the favourites of the copy you actually use —
+and a panel is checked by clicking things, which is exactly what writes. `--profile <name>`
+moves both files into `%APPDATA%\Azur Audio Switcher\profiles\<name>`, nested under the
+default folder rather than beside it so that no-profile resolves to exactly the path it always
+has: a flag that exists to leave your settings alone must not move them to introduce itself.
+The name is whitelisted to letters, digits, `-` and `_` — it is joined onto a path, so
+`--profile ..\..\Startup` is a usage error rather than a directory, and
+`a_profile_name_cannot_escape_the_folder_it_names` holds that.
+
+The flag is deliberately **not** baked into the `claude-run` alias. It is the program's flag
+rather than cargo's, and an alias that passed it silently is how a run you thought was
+isolated writes somewhere you did not mean.
 
 ## Version compatibility
 
