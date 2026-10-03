@@ -1,0 +1,80 @@
+[package]
+name = "azur-audio-switcher"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+description = "Switch audio devices and set per-application volume, from a widget you summon with a keystroke"
+publish = false
+
+[build-dependencies]
+# The `.ico` that Explorer and a pinned shortcut show has to be in the
+# executable's PE resources, which means the linker, which means a build script.
+# `build.rs` draws the icon from `src/mark.rs` and hands the file to this.
+winresource = "0.1"
+
+[dependencies]
+# The Azur design system as an egui theme. Its egui and ours have to be the same
+# version -- two eguis in one graph are two different `Context` types, and the
+# theme would style neither. `cargo tree -d -p egui` is the check.
+azur-egui-theme = { path = "../azur-egui-theme" }
+egui = { version = "0.35", default-features = false }
+eframe = { version = "0.35", default-features = false, features = [
+    # wgpu, not glow, and the reason is not performance. glow presents through OpenGL,
+    # and the compositor hands an OpenGL window to the screen through a vertical
+    # resample: a one-pixel line loses a quarter of its contrast and the faintest ones
+    # vanish. This panel is drawn in one-pixel strokes, so it cannot afford that.
+    # `azur_egui_theme::render` has the measurement and picks the backend.
+    #
+    # glow stays compiled in as an escape hatch for a machine where wgpu will not
+    # start, which is the only thing it is still here for. It costs a smaller resident
+    # set, which was why it used to be the default.
+    "wgpu",
+    "glow",
+    "default_fonts",
+] }
+
+[dev-dependencies]
+# Tests only, and for one job: decoding the PNGs the design system ships beside its
+# `app.ico`, so `mark.rs` can assert that what it draws at run time is that icon
+# pixel for pixel rather than a second drawing that resembles it. Nothing in the
+# shipped binary decodes a PNG -- see `mark`.
+png = "0.18"
+
+[target.'cfg(windows)'.dependencies]
+# Named directly, not just through `windows`, because `#[interface]` expands to
+# `windows_core::` paths — which is how `audio::policy` declares the undocumented
+# interface that sets a default device. Same version as the one `windows` pulls in,
+# so Cargo unifies them rather than putting two COM runtimes in the graph.
+windows-core = "0.62"
+# To get at the `HWND` behind eframe's window, which is the only way to tell DWM to
+# stop drawing an outline of its own over the one the theme paints. eframe depends on
+# this same version but does not re-export it.
+raw-window-handle = "0.6"
+# Core Audio (MMDevice + WASAPI session control) is the whole of the backend.
+# Endpoints carries IAudioEndpointVolume and IAudioMeterInformation; Shell and
+# Gdi are for reading an application's own icon out of its executable.
+windows = { version = "0.62", features = [
+    "Win32_Devices_FunctionDiscovery",
+    "Win32_Foundation",
+    "Win32_Graphics_Dwm",
+    "Win32_Graphics_Gdi",
+    "Win32_Media_Audio",
+    "Win32_Media_Audio_Endpoints",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Com",
+    "Win32_System_Com_StructuredStorage",
+    "Win32_System_Threading",
+    "Win32_System_Variant",
+    # RegisterHotKey, for the keystroke that summons the widget.
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_Shell",
+    "Win32_UI_Shell_PropertiesSystem",
+    "Win32_UI_WindowsAndMessaging",
+] }
+
+[profile.release]
+# A tray-resident widget; size and startup matter more than the last few percent
+# of throughput in code that spends its life waiting on a 60Hz vsync.
+opt-level = "s"
+lto = "thin"
+strip = true
