@@ -32,7 +32,7 @@ equivalent elsewhere that a stub could stand in for.
 | | |
 | --- | --- |
 | **Default devices** | Pick the output and input device: the console and multimedia roles, which every ordinary sound on the machine uses. Calls have their own pair — the **Communications** section below — and this does not touch them. |
-| **Communications** | Windows keeps a *second* pair of defaults, for calls, and this is the control for it: its own section under the first, shut by default and one row wide when it is. Independent of the section above, so a headset chosen for calls stays chosen. |
+| **Communications** | Windows keeps a *second* pair of defaults, for calls, and this is the control for it: its own section under the first, one row wide until you open it. Independent of the section above, so a headset chosen for calls stays chosen. |
 | **Master volume** | Output and input, on Core Audio's scalar curve — the same one the Windows volume slider moves along, so a number here matches the number there. |
 | **Mute** | Click any speaker or microphone glyph. One control, in eight places: the two endpoints and every application. Red when it is off. |
 | **Volume mixer** | Every application rendering to the default output, with its real name and its own icon, its own slider and its own mute. Ordered starred → making sound → the rest, alphabetical inside each group. |
@@ -43,7 +43,7 @@ equivalent elsewhere that a stub could stand in for.
 | **Stay open** | Header toggle. On: the panel sits above other windows and waits to be dismissed. Off: it hides the moment you click away. |
 | **Where it opens** | Header toggle. Either under the mouse, or where you left it — and "where you left it" is measured from the corner of a screen, so it comes back in the same corner of whichever screen the mouse is on. |
 | **Windows audio settings** | The ⧉ in the header, leftmost of its four buttons. Everything past picking a device — sample rates, spatial audio, exclusive mode — is the long tail, and the page that already has it is a better place for it than a 340px panel. |
-| **Remembered** | Both header toggles, in `%APPDATA%\Azur Audio Switcher\settings.txt` — two `key = value` lines beside the favourites, editable by hand. Set them once and they are how the widget starts tomorrow. `--profile <name>` gives a run its own copy of both files. |
+| **Remembered** | Both header toggles and whether the Communications section is open, in `%APPDATA%\Azur Audio Switcher\settings.txt` — three `key = value` lines beside the favourites, editable by hand. Set them once and they are how the widget starts tomorrow. `--profile <name>` gives a run its own copy of both files. |
 
 Follows the system rather than itself: press a keyboard volume key, or move a
 slider in Windows' own mixer, and this moves.
@@ -492,20 +492,31 @@ these two, then ✕. It is the only one of the four that is not about this windo
 is why it is at the far end of them — and it is a plain button rather than a toggle, so
 it has no state to draw and needs no `pressed`.
 
-**Both are remembered between runs**, in `%APPDATA%\Azur Audio Switcher\settings.txt`:
+**Both are remembered between runs**, in `%APPDATA%\Azur Audio Switcher\settings.txt`,
+along with the one piece of layout that is also a preference — whether the *Communications*
+section is open:
 
 ```
 stay-open = off
 placement = at-pointer
+communications = shut
 ```
 
 They are settings rather than window state, which is the distinction that decides what
 gets written down here. They say how the panel should *behave* — whether it gets in the
-way, where it arrives — and somebody who turned *stay open* off because a panel over
-their work is the thing they disliked about it does not want to turn it off again
-tomorrow. The window's size and position are still not kept: those are where the panel
-happened to be sitting, and "where you left it" is already remembered for as long as it
+way, where it arrives, what of it there is to look at — and somebody who turned *stay open*
+off because a panel over their work is the thing they disliked about it does not want to turn
+it off again tomorrow. The window's size and position are still not kept: those are where the
+panel happened to be sitting, and "where you left it" is already remembered for as long as it
 means anything, which is this session on this arrangement of monitors.
+
+The section earns its place in that file on the same test. The argument against was that a
+disclosure which remembers being opened is a section that is never shut again; the answer is
+that shutting it is remembered too, so what comes back is the state it was last *left* in —
+shut, for the majority who never open it, and the two pickers for somebody who runs a headset
+and speakers. `open`/`shut` rather than a third `on`/`off`, because `communications = off`
+is a line somebody would read as "do not use a communications device", which is not a setting
+this program has and would be an alarming one to think you had turned on by accident.
 
 `--no-stay-open`, `--at-pointer` and `--last-position` are then **overrides for one
 run**: they pick what the panel starts as and do not replace what is written down, so a

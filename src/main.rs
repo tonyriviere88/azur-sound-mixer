@@ -14,11 +14,11 @@
 //! azur-audio-switcher --profile test       its own settings and favourites
 //! ```
 //!
-//! The panel's two header toggles are remembered between runs — see [`settings`] — and a
-//! flag that sets one of them (`--no-stay-open`, `--at-pointer`, `--last-position`)
-//! overrides what is remembered for that run without replacing it. `--profile` says *which*
-//! remembered settings, which is what makes a second copy safe to start — see
-//! [`state_directory`].
+//! The panel's two header toggles are remembered between runs, as is whether its
+//! *Communications* section is open — see [`settings`] — and a flag that sets one of the
+//! toggles (`--no-stay-open`, `--at-pointer`, `--last-position`) overrides what is
+//! remembered for that run without replacing it. `--profile` says *which* remembered
+//! settings, which is what makes a second copy safe to start — see [`state_directory`].
 //!
 //! Four layers, and the boundaries between them are the point:
 //!

@@ -11,7 +11,7 @@
 //! │ [ Speakers (Realtek(R) Audio)    ˅ ] │
 //! │ [ Microphone Array               ˅ ] │
 //! │ ──────────────────────────────────── │
-//! │ Communications                    ˅  │  where calls go; shut by default
+//! │ Communications                    ˅  │  where calls go; shut until opened
 //! │ ──────────────────────────────────── │
 //! │ Volume mixer                         │
 //! │ ▣ System sounds              🔊  ☆   │  one block per session,
@@ -32,10 +32,10 @@
 //! system rather than with itself — press a keyboard volume key and this moves.
 //!
 //! The exceptions are the three things the system cannot tell us: which
-//! applications are starred, the two chrome toggles, and the couple of
-//! hundred milliseconds after a write during which the backend has not read the
-//! new value back yet. That last one is [`Echo`], and it is what keeps a dragged
-//! slider from stuttering against a 20Hz poll.
+//! applications are starred, how the panel itself is set up — the two chrome toggles and
+//! which section is open — and the couple of hundred milliseconds after a write during
+//! which the backend has not read the new value back yet. That last one is [`Echo`], and
+//! it is what keeps a dragged slider from stuttering against a 20Hz poll.
 //!
 //! The first two outlive the process — [`crate::favourites`] and [`crate::settings`],
 //! one file each under `%APPDATA%` — because both of them are the user telling the
@@ -161,12 +161,17 @@ pub struct App {
     shows_seen: u64,
     /// Whether the communications section is showing its two pickers.
     ///
-    /// Shut on every launch, and the section exists at all because that is affordable:
-    /// where calls go is a thing somebody sets when they get a headset and then leaves
-    /// alone for months, so it earns a row and not the 80px two more selects would take
-    /// out of the mixer list. Not in [`crate::settings`] with the chrome toggles — those
-    /// are how the panel behaves, this is which part of it is being looked at, and a
-    /// disclosure that remembers being opened once is a section that is never shut again.
+    /// Shut until somebody opens it, and then remembered — the third thing in
+    /// [`crate::settings`], written on the same click that draws it. The section exists at
+    /// all because a shut one is affordable: where calls go is a thing somebody sets when
+    /// they get a headset and then leaves alone for months, so it earns a row rather than
+    /// the 80px two more selects would take out of the mixer list.
+    ///
+    /// The argument against remembering it was that a disclosure which remembers being
+    /// opened is a section that is never shut again. The answer is that shutting it is
+    /// remembered too: what comes back is the state it was last *left* in, which for
+    /// somebody who never touches it is shut, and for somebody who runs two devices is the
+    /// pair of pickers they went looking for the last time.
     communications_open: bool,
 }
 
@@ -223,6 +228,10 @@ impl App {
         }
         resident.set_placement(placement);
 
+        // Read out before `settings` is moved into the struct, rather than relying on the
+        // order the field initialisers happen to be written in.
+        let communications_open = settings.communications_open();
+
         let app = Self {
             theme,
             audio: AudioController::spawn(ctx.clone(), resident.wake()),
@@ -241,7 +250,7 @@ impl App {
             communications_input_pick: None,
             focus_seen: false,
             shows_seen: 0,
-            communications_open: false,
+            communications_open,
         };
         if start_visible {
             // Through the resident thread rather than by starting the window
@@ -860,32 +869,31 @@ impl App {
 
     /// Where calls go: the same two lists, for Windows' communications role.
     ///
-    /// Shut by default and one row wide when it is, because this is the setting of
-    /// somebody who owns a headset and a pair of speakers and wants each used for what
-    /// it is good at — a real want, and not a frequent one. Open, it is the section
-    /// above again: the same devices, the same two glyphs, a different role.
+    /// One row wide until it is opened, because this is the setting of somebody who owns a
+    /// headset and a pair of speakers and wants each used for what it is good at — a real
+    /// want, and not a frequent one. Open, it is the section above again: the same devices,
+    /// the same two glyphs, a different role. Which of the two it comes back as is
+    /// remembered, so a machine where this matters opens showing it.
     ///
-    /// The caption is there because the one thing that matters here cannot be seen in the
-    /// controls: these two are **independent** of the two above them — see
-    /// [`Command::SetDefaultDevice`], where each role writes only its own endpoints. Two
-    /// pickers that look identical to two others, over the same device list, would
-    /// otherwise be read as a duplicate of them, and the reading that follows from that —
-    /// "the section above sets this as well" — is the one somebody would only find out was
-    /// wrong by wondering why their calls came out of the speakers.
+    /// These two are **independent** of the two above them — see
+    /// [`Command::SetDefaultDevice`], where each role writes only its own endpoints — and the
+    /// heading is the whole of what the panel says about it. A caption said it in words for a
+    /// while and is deliberately gone: two lines of `text-tertiary` over the controls they
+    /// describe is an explanation the section carries every time it is opened, for a reader
+    /// who needed it once, and this panel's answer to "would a sentence help here" has been
+    /// no everywhere else. What it explained now lives in the README and in these docs.
     fn communications(&mut self, ui: &mut Ui, snapshot: &Snapshot) {
         if widgets::section_toggle(ui, "Communications", self.communications_open).clicked() {
             self.communications_open = !self.communications_open;
+            // Down with the two chrome toggles, and for the same reason: a click is the user
+            // saying how they want the panel, and being asked twice is being asked too often.
+            self.settings
+                .remember_communications_open(self.communications_open);
         }
         if !self.communications_open {
             return;
         }
 
-        ui.add_space(space::S2);
-        ui.add(
-            Text::new("Where calls go. Set here only, not above.")
-                .variant(TextVariant::Caption)
-                .color(TextColor::Tertiary),
-        );
         ui.add_space(space::S2);
 
         self.communications_output_pick = self.echo.device(

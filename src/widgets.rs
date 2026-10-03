@@ -254,7 +254,9 @@ pub fn app_icon(
 /// Azur has no accordion, and this is not one — an accordion owns its content and
 /// animates it. The caller keeps the `bool` and simply draws less, which is what a
 /// panel whose height is the user's to set wants: a collapsed section gives its
-/// space to the mixer list, and nothing has to be told.
+/// space to the mixer list, and nothing has to be told. It is also what lets that
+/// `bool` live somewhere a widget could not put it — for the one caller here, in
+/// [`crate::settings`], so the section comes back the way it was left.
 ///
 /// The height is `control-small`, matching the selects it sits over. Azur's
 /// `MenuItem` is the other row of this shape and is a fixed 36px, which is the one
